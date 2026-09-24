@@ -15,7 +15,7 @@ import engine
 import ta
 import theme as T
 
-st.set_page_config(page_title="ProTrader · US Markets", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Alturaifi Pro", page_icon="📈", layout="wide")
 st.markdown(T.CSS, unsafe_allow_html=True)
 
 ss = st.session_state
