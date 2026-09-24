@@ -1,6 +1,6 @@
 """
-engine.py - Strategies, backtesting (with stop loss / take profit / trailing stop),
-scanner, trade plans and catalyst scoring. Pure pandas, no UI.
+engine.py - Strategies, backtesting (stop loss / take profit / trailing stop), scanner, trade plans and
+catalyst scoring. Pure pandas. Text outputs are bilingual: every message has an English and an Arabic version.
 """
 import math
 
@@ -8,81 +8,9 @@ import numpy as np
 import pandas as pd
 
 import ta
-
-# =====================================================================
-# Universe (US market)
-# =====================================================================
-SECTORS = {
-    "Technology": ["AAPL", "MSFT", "NVDA", "AVGO", "ORCL", "CRM", "ADBE", "AMD", "INTC", "QCOM", "TXN", "MU",
-                   "AMAT", "LRCX", "KLAC", "ADI", "MRVL", "PANW", "CRWD", "NOW", "INTU", "PLTR", "SNOW",
-                   "NET", "DDOG", "ARM", "SMCI", "DELL", "IBM", "CSCO", "ANET", "SHOP"],
-    "Communication": ["GOOGL", "META", "NFLX", "DIS", "TMUS", "VZ", "T"],
-    "Consumer": ["AMZN", "TSLA", "HD", "MCD", "NKE", "SBUX", "LOW", "TGT", "COST", "WMT", "PG", "KO",
-                 "PEP", "CMG", "LULU", "BKNG", "ABNB", "UBER"],
-    "Financials": ["JPM", "BAC", "WFC", "GS", "MS", "C", "SCHW", "BLK", "V", "MA", "AXP", "PYPL",
-                   "COIN", "HOOD", "SOFI"],
-    "Healthcare": ["LLY", "UNH", "JNJ", "ABBV", "MRK", "PFE", "TMO", "ABT", "ISRG", "AMGN", "GILD",
-                   "VRTX", "REGN", "MRNA"],
-    "Energy": ["XOM", "CVX", "COP", "SLB", "OXY"],
-    "Industrials": ["CAT", "DE", "BA", "GE", "HON", "UPS", "LMT", "RTX"],
-    "Autos & Other": ["MSTR", "RIVN", "LCID", "F", "GM"],
-}
-SECTOR_OF = {s: sec for sec, syms in SECTORS.items() for s in syms}
-US_UNIVERSE = [s for syms in SECTORS.values() for s in syms]
-
-SECTOR_ETFS = {"XLK": "Technology", "XLC": "Communication", "XLY": "Cons. Discretionary",
-               "XLP": "Cons. Staples", "XLF": "Financials", "XLV": "Health Care", "XLE": "Energy",
-               "XLI": "Industrials", "XLB": "Materials", "XLU": "Utilities", "XLRE": "Real Estate"}
-
-MARKET_TILES = {
-    "Indices": {"^GSPC": "S&P 500", "^IXIC": "Nasdaq", "^DJI": "Dow Jones", "^RUT": "Russell 2000",
-                "^VIX": "VIX (Fear)"},
-    "Futures": {"ES=F": "S&P Futures", "NQ=F": "Nasdaq Futures", "YM=F": "Dow Futures",
-                "RTY=F": "Russell Futures"},
-    "Treasury Yields": {"^IRX": "13W T-Bill", "^FVX": "5Y Yield", "^TNX": "10Y Yield", "^TYX": "30Y Yield"},
-    "Commodities": {"GC=F": "Gold", "SI=F": "Silver", "CL=F": "WTI Crude", "BZ=F": "Brent Crude",
-                    "NG=F": "Natural Gas", "HG=F": "Copper"},
-    "Currencies": {"DX-Y.NYB": "US Dollar Index", "EURUSD=X": "EUR/USD", "JPY=X": "USD/JPY",
-                   "GBPUSD=X": "GBP/USD"},
-    "Crypto": {"BTC-USD": "Bitcoin", "ETH-USD": "Ethereum", "SOL-USD": "Solana"},
-}
-
-# FRED economic series: id -> (name, transform, unit, higher_is_bad)
-MACRO_SERIES = {
-    "FEDFUNDS": ("Fed Funds Rate", "level", "%", None),
-    "CPIAUCSL": ("CPI Inflation (YoY)", "yoy", "%", True),
-    "CPILFESL": ("Core CPI (YoY)", "yoy", "%", True),
-    "PCEPILFE": ("Core PCE (YoY)", "yoy", "%", True),
-    "UNRATE": ("Unemployment Rate", "level", "%", True),
-    "PAYEMS": ("Nonfarm Payrolls (MoM)", "diff", "K", False),
-    "A191RL1Q225SBEA": ("Real GDP Growth (QoQ ann.)", "level", "%", False),
-    "ICSA": ("Initial Jobless Claims", "level_k", "K", True),
-    "T10Y2Y": ("10Y-2Y Yield Spread", "level", "%", False),
-    "RSAFS": ("Retail Sales (MoM)", "mom", "%", False),
-    "INDPRO": ("Industrial Production (YoY)", "yoy", "%", False),
-    "UMCSENT": ("Consumer Sentiment", "level", "", False),
-    "MORTGAGE30US": ("30Y Mortgage Rate", "level", "%", True),
-    "M2SL": ("M2 Money Supply (YoY)", "yoy", "%", None),
-}
+import universe as U
 
 
-def macro_transform(s: pd.Series, how: str) -> pd.Series:
-    s = s.dropna()
-    if how == "yoy":
-        freq = 52 if len(s) > 2 and (s.index[-1] - s.index[-2]).days < 10 else 12
-        return (s / s.shift(freq) - 1) * 100
-    if how == "mom":
-        return (s / s.shift(1) - 1) * 100
-    if how == "diff":
-        return s.diff()
-    if how == "level_k":
-        return s / 1000
-    return s
-
-
-# =====================================================================
-# Strategies: each returns (entries, exits) boolean Series
-# =====================================================================
 def _cross_up(a, b):
     return (a > b) & (a.shift(1) <= b.shift(1))
 
@@ -282,8 +210,24 @@ def optimize(df, name, px, xs, py, ys, base_params, capital=10000, fee=0.0005, m
 # =====================================================================
 # Trade plan: entry / stop / targets / timing
 # =====================================================================
+STRATEGY_AR = {"SMA Crossover": "تقاطع المتوسطات البسيطة", "EMA Crossover": "تقاطع المتوسطات الأسية",
+               "Golden Cross (50/200)": "التقاطع الذهبي 50/200", "RSI Mean Reversion": "الارتداد بمؤشر RSI",
+               "MACD Crossover": "تقاطع الماكد", "Bollinger Breakout": "اختراق بولنجر",
+               "Donchian Breakout (Turtle)": "اختراق دونشيان (السلحفاة)"}
+PARAM_AR = {"Fast SMA": "المتوسط السريع", "Slow SMA": "المتوسط البطيء", "Fast EMA": "الأسي السريع",
+            "Slow EMA": "الأسي البطيء", "RSI Period": "فترة RSI", "Buy when RSI crosses up": "شراء عند صعود RSI فوق",
+            "Sell when RSI above": "بيع عندما RSI فوق", "Fast": "السريع", "Slow": "البطيء", "Signal": "الإشارة",
+            "Period": "الفترة", "Std Dev": "الانحراف المعياري", "Entry High (days)": "قمة الدخول (أيام)",
+            "Exit Low (days)": "قاع الخروج (أيام)"}
+SETUP_AR = {"Breakout": "اختراق", "Pullback to SMA20": "ارتداد لمتوسط 20", "Oversold Bounce": "ارتداد من تشبع بيعي",
+            "Downtrend": "اتجاه هابط", "Range / Wait": "تذبذب / انتظار"}
+BIAS_AR = {"Long": "شراء", "Long (aggressive)": "شراء (مغامر)", "Avoid / No Long": "تجنّب", "Neutral": "محايد"}
+EXIT_REASON_AR = {"Signal": "إشارة", "Stop Loss": "وقف خسارة", "Trailing Stop": "وقف متحرك", "Take Profit": "جني أرباح",
+                  "Open": "مفتوحة"}
+
+
 def trade_plan(d, account=10000, risk_pct=1.0):
-    """d must already have ta.add_all() columns (daily bars)."""
+    """d must already have ta.add_all() columns (daily bars). Every text field has _en and _ar versions."""
     last = d.iloc[-1]
     price, a = float(last["Close"]), float(last["ATR"])
     sma20, sma50, sma200 = last["SMA20"], last["SMA50"], last["SMA200"]
@@ -301,52 +245,62 @@ def trade_plan(d, account=10000, risk_pct=1.0):
         setup, bias = "Breakout", "Long"
         entry = hh20 * 1.001
         zone = (entry, entry + 0.5 * a)
-        trigger = f"Buy on a daily close above ${entry:,.2f} (20-day high) with volume ≥ 1.5× average."
+        trig = (f"Buy on a daily close above ${entry:,.2f} (20-day high) with volume ≥ 1.5× average.",
+                f"اشترِ عند إغلاق يومي فوق ${entry:,.2f} (قمة 20 يوم) مع حجم تداول ≥ 1.5 ضعف المتوسط.")
         stop = entry - 1.5 * a
     elif up_trend and abs(price - sma20) <= 1.2 * a:
         setup, bias = "Pullback to SMA20", "Long"
         entry = float(sma20) + 0.2 * a
         zone = (float(sma20) - 0.25 * a, float(sma20) + 0.5 * a)
-        trigger = (f"Buy near the 20-day average (${zone[0]:,.2f} – ${zone[1]:,.2f}) once a green candle "
-                   f"closes above the prior day's high.")
+        trig = (f"Buy near the 20-day average (${zone[0]:,.2f} – ${zone[1]:,.2f}) once a green candle closes above the prior day's high.",
+                f"اشترِ قرب متوسط 20 يوم (${zone[0]:,.2f} – ${zone[1]:,.2f}) بعد إغلاق شمعة خضراء فوق قمة اليوم السابق.")
         stop = min(entry - 1.5 * a, support - 0.25 * a) if entry - support < 3 * a else entry - 1.5 * a
     elif last["RSI"] < 35 and (pd.isna(sma200) or price > sma200):
         setup, bias = "Oversold Bounce", "Long (aggressive)"
         entry = float(d["High"].iloc[-1]) * 1.001
         zone = (price, entry)
-        trigger = f"Buy only after a close above yesterday's high ${entry:,.2f} (reversal confirmation)."
+        trig = (f"Buy only after a close above yesterday's high ${entry:,.2f} (reversal confirmation).",
+                f"اشترِ فقط بعد إغلاق فوق قمة الأمس ${entry:,.2f} (تأكيد الارتداد).")
         stop = float(d["Low"].tail(10).min()) - 0.5 * a
     elif down_trend:
         setup, bias = "Downtrend", "Avoid / No Long"
         entry = float(sma50)
         zone = (entry, entry + 0.5 * a)
-        trigger = f"No long setup. Re-check only after the price reclaims the 50-day average (${entry:,.2f})."
+        trig = (f"No long setup. Re-check only after the price reclaims the 50-day average (${entry:,.2f}).",
+                f"لا توجد فرصة شراء. أعد التقييم بعد عودة السعر فوق متوسط 50 يوم (${entry:,.2f}).")
         stop = entry - 1.5 * a
     else:
         setup, bias = "Range / Wait", "Neutral"
         level = min(hh20, resist) if resist > price else hh20
         entry = level * 1.001
         zone = (entry, entry + 0.5 * a)
-        trigger = f"Wait. A daily close above ${entry:,.2f} (nearest resistance) would confirm strength."
+        trig = (f"Wait. A daily close above ${entry:,.2f} (nearest resistance) would confirm strength.",
+                f"انتظر. إغلاق يومي فوق ${entry:,.2f} (أقرب مقاومة) يؤكد القوة.")
         stop = max(support - 0.25 * a, entry - 2 * a)
 
     risk = max(entry - stop, 0.01)
     t1, t2 = entry + 2 * risk, entry + 3 * risk
     shares = int(account * risk_pct / 100 / risk)
     shares = min(shares, int(account / entry)) if entry > 0 else 0
-
+    trail = float(d["High"].tail(20).max()) - 3 * a
     exits = [
-        f"Stop loss: exit if price trades below ${stop:,.2f} ({(stop / entry - 1) * 100:.1f}% / "
-        f"{risk / a:.1f}× ATR).",
-        f"Target 1 (2R): ${t1:,.2f}. Sell 1/2 and move the stop to break-even (${entry:,.2f}).",
-        f"Target 2 (3R): ${t2:,.2f}. Nearest resistance: ${resist:,.2f}.",
-        f"Trailing stop after T1: highest high − 3× ATR (≈ ${float(d['High'].tail(20).max()) - 3 * a:,.2f} today).",
-        f"Trend exit: daily close below the 20-day average (${sma20:,.2f}).",
-        "Time stop: exit if the trade hasn't reached T1 within 15 trading days.",
+        (f"Stop loss: exit if price trades below ${stop:,.2f} ({(stop / entry - 1) * 100:.1f}% / {risk / a:.1f}× ATR).",
+         f"وقف الخسارة: اخرج إذا نزل السعر تحت ${stop:,.2f} ({(stop / entry - 1) * 100:.1f}% / {risk / a:.1f} ضعف ATR)."),
+        (f"Target 1 (2R): ${t1:,.2f}. Sell half and move the stop to break-even (${entry:,.2f}).",
+         f"الهدف الأول (2R): ${t1:,.2f}. بِع النصف وارفع الوقف لسعر الدخول (${entry:,.2f})."),
+        (f"Target 2 (3R): ${t2:,.2f}. Nearest resistance: ${resist:,.2f}.",
+         f"الهدف الثاني (3R): ${t2:,.2f}. أقرب مقاومة: ${resist:,.2f}."),
+        (f"Trailing stop after T1: highest high − 3× ATR (≈ ${trail:,.2f} today).",
+         f"وقف متحرك بعد الهدف الأول: أعلى قمة − 3 أضعاف ATR (≈ ${trail:,.2f} اليوم)."),
+        (f"Trend exit: daily close below the 20-day average (${sma20:,.2f}).",
+         f"خروج الاتجاه: إغلاق يومي تحت متوسط 20 يوم (${sma20:,.2f})."),
+        ("Time stop: exit if the trade hasn't reached T1 within 15 trading days.",
+         "وقف زمني: اخرج إذا لم تصل الصفقة للهدف الأول خلال 15 يوم تداول."),
     ]
     return {
-        "setup": setup, "bias": bias, "price": price, "atr": a, "atr_pct": a / price * 100,
-        "entry": entry, "zone": zone, "trigger": trigger, "stop": stop, "t1": t1, "t2": t2,
+        "setup": setup, "setup_ar": SETUP_AR[setup], "bias": bias, "bias_ar": BIAS_AR[bias],
+        "price": price, "atr": a, "atr_pct": a / price * 100, "entry": entry, "zone": zone,
+        "trigger": trig[0], "trigger_ar": trig[1], "stop": stop, "t1": t1, "t2": t2,
         "rr1": (t1 - entry) / risk, "rr2": (t2 - entry) / risk, "risk_per_share": risk,
         "shares": shares, "position_value": shares * entry, "support": support, "resistance": resist,
         "exits": exits,
@@ -356,14 +310,11 @@ def trade_plan(d, account=10000, risk_pct=1.0):
 # =====================================================================
 # Scanner
 # =====================================================================
-SCAN_PRESETS = {
-    "All Signals": None,
-    "Momentum Breakout": "breakout",
-    "Trend Pullback": "pullback",
-    "Oversold Bounce": "oversold",
-    "Golden Cross": "golden",
-    "Unusual Volume": "volume",
-    "Volatility Squeeze": "squeeze",
+SCAN_PRESETS = {  # key -> (english, arabic, tag)
+    "all": ("All Signals", "كل الإشارات", None), "breakout": ("Momentum Breakout", "اختراق بزخم", "breakout"),
+    "pullback": ("Trend Pullback", "ارتداد في اتجاه صاعد", "pullback"), "oversold": ("Oversold Bounce", "ارتداد من تشبع بيعي", "oversold"),
+    "golden": ("Golden Cross", "تقاطع ذهبي", "golden"), "volume": ("Unusual Volume", "حجم غير طبيعي", "volume"),
+    "squeeze": ("Volatility Squeeze", "انضغاط التذبذب", "squeeze"),
 }
 
 
@@ -372,72 +323,65 @@ def scan_symbol(df, spy_ret_63=None):
         return None
     d = ta.add_all(df)
     last, prev = d.iloc[-1], d.iloc[-2]
-    tags, signals, score = set(), [], 0
+    tags, sig, score = set(), [], 0
+
+    def add(en, ar, pts, tag=None):
+        nonlocal score
+        sig.append((en, ar))
+        score += pts
+        if tag:
+            tags.add(tag)
 
     above = (d["SMA20"] > d["SMA50"]).astype(int)
     if above.iloc[-1] == 1 and above.iloc[-4:-1].min() == 0:
-        signals.append("Golden Cross 20/50"); score += 2; tags.add("golden")
+        add("Golden Cross 20/50", "تقاطع ذهبي 20/50", 2, "golden")
     elif above.iloc[-1] == 0 and above.iloc[-4:-1].max() == 1:
-        signals.append("Death Cross 20/50"); score -= 2
-
+        add("Death Cross 20/50", "تقاطع سلبي 20/50", -2)
     if last["Close"] >= d["High"].iloc[-21:-1].max():
-        signals.append("20D Breakout"); score += 2; tags.add("breakout")
+        add("20D Breakout", "اختراق قمة 20 يوم", 2, "breakout")
     if last["Close"] >= 0.98 * d["High"].tail(252).max():
-        signals.append("Near 52W High"); score += 1
-
+        add("Near 52W High", "قرب القمة السنوية", 1)
     vr = last["Volume"] / last["VolAvg20"] if last.get("VolAvg20", 0) > 0 else np.nan
     if pd.notna(vr) and vr >= 2:
-        signals.append(f"Volume {vr:.1f}×"); score += 1; tags.add("volume")
-
+        add(f"Volume {vr:.1f}×", f"حجم {vr:.1f}×", 1, "volume")
     if last["RSI"] < 30:
-        signals.append("RSI Oversold"); score += 1; tags.add("oversold")
+        add("RSI Oversold", "تشبع بيعي RSI", 1, "oversold")
     elif last["RSI"] > 75:
-        signals.append("RSI Overbought"); score -= 1
-
+        add("RSI Overbought", "تشبع شرائي RSI", -1)
     if last["MACD"] > last["MACD_signal"] and prev["MACD"] <= prev["MACD_signal"]:
-        signals.append("MACD Bull Cross"); score += 1
-
+        add("MACD Bull Cross", "تقاطع ماكد إيجابي", 1)
     trend_up = pd.notna(last["SMA200"]) and last["Close"] > last["SMA50"] > last["SMA200"]
     if trend_up:
         score += 1
         if abs(last["Close"] - last["SMA20"]) <= last["ATR"] and last["RSI"] < 60:
-            signals.append("Pullback to SMA20"); score += 1; tags.add("pullback")
+            add("Pullback to SMA20", "ارتداد لمتوسط 20", 1, "pullback")
     elif pd.notna(last["SMA200"]) and last["Close"] < last["SMA200"]:
-        signals.append("Below SMA200"); score -= 1
-
+        add("Below SMA200", "تحت متوسط 200", -1)
     if pd.notna(last["ADX"]) and last["ADX"] > 25 and last["DI_plus"] > last["DI_minus"]:
-        signals.append(f"Strong Trend (ADX {last['ADX']:.0f})"); score += 1
-
+        add(f"Strong Trend (ADX {last['ADX']:.0f})", f"اتجاه قوي (ADX {last['ADX']:.0f})", 1)
     bw = d["BB_width"].tail(126)
     if len(bw.dropna()) > 50 and bw.iloc[-1] <= bw.quantile(0.1):
-        signals.append("BB Squeeze"); tags.add("squeeze")
-
+        add("BB Squeeze", "انضغاط بولنجر", 0, "squeeze")
     gap = (last["Open"] / prev["Close"] - 1) * 100
     if gap >= 3:
-        signals.append(f"Gap Up {gap:.1f}%"); score += 1
+        add(f"Gap Up {gap:.1f}%", f"فجوة صاعدة {gap:.1f}%", 1)
     elif gap <= -3:
-        signals.append(f"Gap Down {gap:.1f}%"); score -= 1
-
+        add(f"Gap Down {gap:.1f}%", f"فجوة هابطة {gap:.1f}%", -1)
     ret_63 = (last["Close"] / d["Close"].iloc[-64] - 1) * 100 if len(d) > 64 else np.nan
     rs = ret_63 - spy_ret_63 if spy_ret_63 is not None and pd.notna(ret_63) else np.nan
     if pd.notna(rs) and rs > 10:
-        signals.append("Outperforming SPY"); score += 1
+        add("Outperforming SPY", "يتفوق على السوق", 1)
 
     plan = trade_plan(d)
+    trend = "Up" if trend_up else ("Down" if last["Close"] < last["SMA50"] else "Mixed")
     return {
-        "Price": float(last["Close"]),
-        "Chg %": float((last["Close"] / prev["Close"] - 1) * 100),
+        "Price": float(last["Close"]), "Chg %": float((last["Close"] / prev["Close"] - 1) * 100),
         "1M %": float((last["Close"] / d["Close"].iloc[-22] - 1) * 100),
-        "3M %": float(ret_63) if pd.notna(ret_63) else None,
-        "RSI": float(last["RSI"]),
-        "ADX": float(last["ADX"]) if pd.notna(last["ADX"]) else None,
-        "Vol ×": float(vr) if pd.notna(vr) else None,
-        "Trend": "Up" if trend_up else ("Down" if last["Close"] < last["SMA50"] else "Mixed"),
-        "Score": score,
-        "Setup": plan["setup"],
-        "Entry": plan["entry"], "Stop": plan["stop"], "Target": plan["t2"],
-        "R:R": plan["rr2"],
-        "Signals": " · ".join(signals) if signals else "—",
+        "3M %": float(ret_63) if pd.notna(ret_63) else None, "RSI": float(last["RSI"]),
+        "ADX": float(last["ADX"]) if pd.notna(last["ADX"]) else None, "Vol ×": float(vr) if pd.notna(vr) else None,
+        "Trend": trend, "Score": score, "Setup": plan["setup"], "Setup_ar": plan["setup_ar"],
+        "Entry": plan["entry"], "Stop": plan["stop"], "Target": plan["t2"], "R:R": plan["rr2"],
+        "Signals": " · ".join(e for e, _ in sig) or "—", "Signals_ar": " · ".join(a for _, a in sig) or "—",
         "_tags": ",".join(sorted(tags)),
     }
 
@@ -453,153 +397,148 @@ def scan(data_by_symbol, spy_df=None):
         except Exception:
             r = None
         if r:
-            rows.append({"Symbol": sym, "Sector": SECTOR_OF.get(sym, "—"), **r})
+            rows.append({"Symbol": sym, "Sector": U.sector_of(sym), **r})
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(["Score", "Vol ×"], ascending=False).reset_index(drop=True)
 
 
 # =====================================================================
-# Catalyst scoring
+# Catalyst scoring (bilingual)
 # =====================================================================
+def _check(en, ar, ok, detail):
+    return {"Check": en, "Check_ar": ar, "Pass": bool(ok), "Detail": detail}
+
+
 def technical_checks(d, spy_df=None):
     last = d.iloc[-1]
-    checks = []
-
-    def add(name, ok, detail):
-        checks.append({"Check": name, "Pass": bool(ok), "Detail": detail})
-
-    add("Primary trend up", pd.notna(last["SMA200"]) and last["Close"] > last["SMA200"],
-        f"Price {last['Close']:,.2f} vs SMA200 {last['SMA200']:,.2f}" if pd.notna(last["SMA200"]) else "n/a")
-    add("MA stack bullish (20 > 50 > 200)",
-        pd.notna(last["SMA200"]) and last["SMA20"] > last["SMA50"] > last["SMA200"],
-        f"SMA20 {last['SMA20']:,.2f} · SMA50 {last['SMA50']:,.2f}")
-    add("Healthy momentum (RSI 50–70)", 50 <= last["RSI"] <= 70, f"RSI {last['RSI']:.0f}")
-    add("MACD above signal", last["MACD"] > last["MACD_signal"], f"Hist {last['MACD_hist']:.3f}")
-    add("Trend strength (ADX > 20, +DI > −DI)",
-        pd.notna(last["ADX"]) and last["ADX"] > 20 and last["DI_plus"] > last["DI_minus"],
-        f"ADX {last['ADX']:.0f}" if pd.notna(last["ADX"]) else "n/a")
-    obv_up = d["OBV"].iloc[-1] > d["OBV"].iloc[-21] if len(d) > 21 else False
-    add("Accumulation (OBV rising 1M)", obv_up, "OBV higher than 20 days ago" if obv_up else "OBV falling")
-    near_high = last["Close"] >= 0.95 * d["High"].tail(252).max()
-    add("Within 5% of 52W high", near_high, f"52W high {d['High'].tail(252).max():,.2f}")
+    c = []
+    has200 = pd.notna(last["SMA200"])
+    c.append(_check("Primary trend up (above SMA200)", "الاتجاه الرئيسي صاعد (فوق متوسط 200)",
+                    has200 and last["Close"] > last["SMA200"],
+                    f"{last['Close']:,.2f} vs {last['SMA200']:,.2f}" if has200 else "n/a"))
+    c.append(_check("Bullish MA stack (20 > 50 > 200)", "ترتيب متوسطات إيجابي (20 > 50 > 200)",
+                    has200 and last["SMA20"] > last["SMA50"] > last["SMA200"],
+                    f"SMA20 {last['SMA20']:,.2f} · SMA50 {last['SMA50']:,.2f}"))
+    c.append(_check("Healthy momentum (RSI 50–70)", "زخم صحي (RSI بين 50 و70)", 50 <= last["RSI"] <= 70, f"RSI {last['RSI']:.0f}"))
+    c.append(_check("MACD above signal", "الماكد فوق خط الإشارة", last["MACD"] > last["MACD_signal"], f"Hist {last['MACD_hist']:.3f}"))
+    c.append(_check("Trend strength (ADX > 20, +DI > −DI)", "قوة الاتجاه (ADX > 20)",
+                    pd.notna(last["ADX"]) and last["ADX"] > 20 and last["DI_plus"] > last["DI_minus"],
+                    f"ADX {last['ADX']:.0f}" if pd.notna(last["ADX"]) else "n/a"))
+    obv_up = bool(d["OBV"].iloc[-1] > d["OBV"].iloc[-21]) if len(d) > 21 else False
+    c.append(_check("Accumulation (OBV rising 1M)", "تجميع (OBV صاعد خلال شهر)", obv_up, "OBV ↑" if obv_up else "OBV ↓"))
+    hi = d["High"].tail(252).max()
+    c.append(_check("Within 5% of 52W high", "ضمن 5% من القمة السنوية", last["Close"] >= 0.95 * hi, f"52W high {hi:,.2f}"))
     bw = d["BB_width"].tail(126).dropna()
-    squeeze = len(bw) > 50 and bw.iloc[-1] <= bw.quantile(0.2)
-    add("Volatility squeeze (coiling)", squeeze, "Bollinger width in lowest 20%" if squeeze else "Normal width")
+    sq = len(bw) > 50 and bw.iloc[-1] <= bw.quantile(0.2)
+    c.append(_check("Volatility squeeze (coiling)", "انضغاط التذبذب (تجميع قبل حركة)", sq, "BB width low" if sq else "normal"))
     vr = last["Volume"] / last["VolAvg20"] if last.get("VolAvg20", 0) > 0 else 0
-    add("Volume confirmation (≥ 1.5× avg)", vr >= 1.5, f"{vr:.1f}× average")
+    c.append(_check("Volume confirmation (≥ 1.5× avg)", "تأكيد بالحجم (≥ 1.5 ضعف)", vr >= 1.5, f"{vr:.1f}×"))
     if spy_df is not None and len(spy_df) > 64 and len(d) > 64:
         rs = (last["Close"] / d["Close"].iloc[-64] - 1) - (spy_df["Close"].iloc[-1] / spy_df["Close"].iloc[-64] - 1)
-        add("Relative strength vs SPY (3M)", rs > 0, f"{rs * 100:+.1f}% vs S&P 500")
-    return checks
+        c.append(_check("Relative strength vs S&P 500 (3M)", "قوة نسبية مقابل السوق (3 أشهر)", rs > 0, f"{rs * 100:+.1f}%"))
+    return c
 
 
 def fundamental_checks(info, earnings_hist=None):
-    checks = []
+    c = []
+    g = info.get
 
-    def add(name, val, ok, fmt):
+    def add(en, ar, val, ok, detail):
         if val is None or (isinstance(val, float) and np.isnan(val)):
             return
-        checks.append({"Check": name, "Pass": bool(ok), "Detail": fmt})
+        c.append(_check(en, ar, ok, detail))
 
-    g = info.get
-    add("Revenue growth > 10%", g("revenueGrowth"), (g("revenueGrowth") or 0) > 0.10,
-        f"{(g('revenueGrowth') or 0) * 100:+.1f}% YoY")
-    add("Earnings growth > 10%", g("earningsGrowth"), (g("earningsGrowth") or 0) > 0.10,
-        f"{(g('earningsGrowth') or 0) * 100:+.1f}% YoY")
-    add("Profit margin > 10%", g("profitMargins"), (g("profitMargins") or 0) > 0.10,
+    add("Revenue growth > 10%", "نمو الإيرادات > 10%", g("revenueGrowth"), (g("revenueGrowth") or 0) > 0.10,
+        f"{(g('revenueGrowth') or 0) * 100:+.1f}%")
+    add("Earnings growth > 10%", "نمو الأرباح > 10%", g("earningsGrowth"), (g("earningsGrowth") or 0) > 0.10,
+        f"{(g('earningsGrowth') or 0) * 100:+.1f}%")
+    add("Profit margin > 10%", "هامش الربح > 10%", g("profitMargins"), (g("profitMargins") or 0) > 0.10,
         f"{(g('profitMargins') or 0) * 100:.1f}%")
-    add("ROE > 15%", g("returnOnEquity"), (g("returnOnEquity") or 0) > 0.15,
+    add("ROE > 15%", "العائد على حقوق المساهمين > 15%", g("returnOnEquity"), (g("returnOnEquity") or 0) > 0.15,
         f"{(g('returnOnEquity') or 0) * 100:.1f}%")
     if g("forwardPE") and g("trailingPE"):
-        add("Forward P/E < Trailing P/E", g("forwardPE"), g("forwardPE") < g("trailingPE"),
+        add("Forward P/E < Trailing P/E", "مكرر الربحية المستقبلي أقل من الحالي", g("forwardPE"), g("forwardPE") < g("trailingPE"),
             f"{g('forwardPE'):.1f} vs {g('trailingPE'):.1f}")
     peg = g("trailingPegRatio") or g("pegRatio")
-    add("PEG < 2", peg, (peg or 99) < 2, f"{peg:.2f}" if peg else "")
-    add("Debt/Equity < 150%", g("debtToEquity"), (g("debtToEquity") or 999) < 150,
-        f"{g('debtToEquity'):.0f}%" if g("debtToEquity") else "")
-    add("Positive free cash flow", g("freeCashflow"), (g("freeCashflow") or 0) > 0,
-        f"${(g('freeCashflow') or 0) / 1e9:,.2f}B")
+    add("PEG < 2", "مؤشر PEG < 2", peg, (peg or 99) < 2, f"{peg:.2f}" if peg else "")
+    de = g("debtToEquity")
+    add("Debt/Equity < 150%", "الديون/حقوق المساهمين < 150%", de, (de or 999) < 150, f"{de:.0f}%" if de else "")
+    fcf = g("freeCashflow")
+    add("Positive free cash flow", "تدفق نقدي حر إيجابي", fcf, (fcf or 0) > 0, f"${(fcf or 0) / 1e9:,.2f}B")
     price, tgt = g("currentPrice") or g("regularMarketPrice"), g("targetMeanPrice")
     if price and tgt:
         up = (tgt / price - 1) * 100
-        add("Analyst upside > 10%", up, up > 10, f"Mean target ${tgt:,.2f} ({up:+.1f}%)")
+        add("Analyst upside > 10%", "مساحة صعود حسب المحللين > 10%", up, up > 10, f"${tgt:,.2f} ({up:+.1f}%)")
     rm = g("recommendationMean")
-    add("Analysts rate Buy (mean ≤ 2.5)", rm, (rm or 5) <= 2.5,
-        f"{rm:.2f} · {g('recommendationKey', '')} ({g('numberOfAnalystOpinions', 0)} analysts)" if rm else "")
-    if earnings_hist is not None and isinstance(earnings_hist, pd.DataFrame) and not earnings_hist.empty:
-        col = next((c for c in earnings_hist.columns if "Surprise" in c), None)
+    add("Analysts rate Buy (mean ≤ 2.5)", "المحللون يوصون بالشراء", rm, (rm or 5) <= 2.5,
+        f"{rm:.2f} · {g('numberOfAnalystOpinions', 0)} analysts" if rm else "")
+    if isinstance(earnings_hist, pd.DataFrame) and not earnings_hist.empty:
+        col = next((x for x in earnings_hist.columns if "Surprise" in x), None)
         if col:
             rep = earnings_hist[col].dropna().head(4)
             if len(rep):
                 beats = int((rep > 0).sum())
-                add("Beat EPS estimates (last 4)", beats, beats >= 3, f"{beats}/{len(rep)} beats")
-    return checks
+                add("Beat EPS estimates (last 4)", "تجاوز توقعات الأرباح (آخر 4)", beats, beats >= 3, f"{beats}/{len(rep)}")
+    return c
+
+
+def _event(en, ar, impact, detail_en, detail_ar):
+    """impact: pos | neg | warn | neutral | hot"""
+    return {"Event": en, "Event_ar": ar, "Impact": impact, "Detail": detail_en, "Detail_ar": detail_ar}
+
+
+IMPACT = {"pos": ("Positive", "إيجابي", "up", "trending_up"), "neg": ("Negative", "سلبي", "down", "trending_down"),
+          "warn": ("High volatility", "تذبذب عالٍ", "gold", "warning"), "neutral": ("Neutral", "محايد", "neu", "schedule"),
+          "hot": ("Attention", "اهتمام مرتفع", "acc", "local_fire_department")}
 
 
 def event_checks(earn_date, ratings, news, info, d):
     items = []
     now = pd.Timestamp.now().normalize()
     if earn_date is not None:
-        days = (pd.Timestamp(earn_date).normalize() - now).days
+        ed = pd.Timestamp(earn_date)
+        days = (ed.normalize() - now).days
         if 0 <= days <= 14:
-            items.append({"Event": "Earnings soon", "Impact": "⚠️ High volatility",
-                          "Detail": f"{pd.Timestamp(earn_date):%b %d} (in {days} days). Size down or exit before."})
+            items.append(_event("Earnings soon", "إعلان أرباح قريب", "warn", f"{ed:%b %d} (in {days} days) — size down or wait",
+                                f"{ed:%Y-%m-%d} (بعد {days} يوم) — خفّف الحجم أو انتظر"))
         elif days > 14:
-            items.append({"Event": "Next earnings", "Impact": "Neutral",
-                          "Detail": f"{pd.Timestamp(earn_date):%b %d, %Y} (in {days} days)"})
+            items.append(_event("Next earnings", "إعلان الأرباح القادم", "neutral", f"{ed:%b %d, %Y} (in {days} days)",
+                                f"{ed:%Y-%m-%d} (بعد {days} يوم)"))
     if isinstance(ratings, pd.DataFrame) and not ratings.empty and "Action" in ratings:
         ups, downs = int((ratings["Action"] == "up").sum()), int((ratings["Action"] == "down").sum())
         if ups or downs:
-            items.append({"Event": "Analyst actions (30D)", "Impact": "🟢 Positive" if ups > downs else
-                          ("🔴 Negative" if downs > ups else "Neutral"),
-                          "Detail": f"{ups} upgrades · {downs} downgrades"})
+            items.append(_event("Analyst actions (30D)", "تحركات المحللين (30 يوم)", "pos" if ups > downs else ("neg" if downs > ups else "neutral"),
+                                f"{ups} upgrades · {downs} downgrades", f"{ups} ترقية · {downs} تخفيض"))
     recent = [n for n in news if pd.notna(n["time"]) and (pd.Timestamp.now(tz="UTC") - n["time"]).days < 3]
     if len(recent) >= 3:
-        items.append({"Event": "In the news", "Impact": "🔥 Attention",
-                      "Detail": f"{len(recent)} headlines in the last 3 days"})
+        items.append(_event("In the news", "في الأخبار", "hot", f"{len(recent)} headlines in 3 days", f"{len(recent)} خبر خلال 3 أيام"))
     si = info.get("shortPercentOfFloat")
     if si and si > 0.15:
-        items.append({"Event": "High short interest", "Impact": "🚀 Squeeze potential",
-                      "Detail": f"{si * 100:.1f}% of float sold short"})
+        items.append(_event("High short interest", "بيع على المكشوف مرتفع", "hot", f"{si * 100:.1f}% of float — squeeze potential",
+                            f"{si * 100:.1f}% من الأسهم الحرة — احتمال ضغط شراء"))
     last, prev = d.iloc[-1], d.iloc[-2]
     vr = last["Volume"] / last["VolAvg20"] if last.get("VolAvg20", 0) > 0 else 0
     if vr >= 2:
-        items.append({"Event": "Unusual volume", "Impact": "🔥 Institutional interest",
-                      "Detail": f"{vr:.1f}× the 20-day average"})
+        items.append(_event("Unusual volume", "حجم تداول غير طبيعي", "pos", f"{vr:.1f}× the 20-day average", f"{vr:.1f} ضعف متوسط 20 يوم"))
     gap = (last["Open"] / prev["Close"] - 1) * 100
     if abs(gap) >= 3:
-        items.append({"Event": "Price gap", "Impact": "🟢 Positive" if gap > 0 else "🔴 Negative",
-                      "Detail": f"{gap:+.1f}% gap at the open"})
+        items.append(_event("Price gap", "فجوة سعرية", "pos" if gap > 0 else "neg", f"{gap:+.1f}% at the open", f"{gap:+.1f}% عند الافتتاح"))
     return items
 
 
 def catalyst_score(tech, fund, events):
     def pct(ch):
-        return sum(c["Pass"] for c in ch) / len(ch) * 100 if ch else None
+        return sum(x["Pass"] for x in ch) / len(ch) * 100 if ch else None
 
     t, f = pct(tech), pct(fund)
     e = 50.0
     for ev in events:
-        imp = ev["Impact"]
-        if "Positive" in imp or "Squeeze" in imp or "Institutional" in imp:
-            e += 12
-        elif "Negative" in imp:
-            e -= 15
-        elif "High volatility" in imp:
-            e -= 5
+        e += {"pos": 12, "hot": 8, "neg": -15, "warn": -5}.get(ev["Impact"], 0)
     e = max(0.0, min(100.0, e))
-    parts = [(t, 0.5), (f, 0.3), (e, 0.2)]
-    avail = [(v, w) for v, w in parts if v is not None]
+    avail = [(v, w) for v, w in ((t, 0.5), (f, 0.3), (e, 0.2)) if v is not None]
     total = sum(v * w for v, w in avail) / sum(w for _, w in avail)
-    if total >= 70:
-        label = "Strong Bullish"
-    elif total >= 55:
-        label = "Bullish"
-    elif total >= 45:
-        label = "Neutral"
-    elif total >= 30:
-        label = "Bearish"
-    else:
-        label = "Strong Bearish"
-    return {"total": total, "technical": t, "fundamental": f, "event": e, "label": label}
+    for th, en, ar in ((70, "Strong Bullish", "إيجابي قوي"), (55, "Bullish", "إيجابي"), (45, "Neutral", "محايد"),
+                       (30, "Bearish", "سلبي"), (-1, "Strong Bearish", "سلبي قوي")):
+        if total >= th:
+            return {"total": total, "technical": t, "fundamental": f, "event": e, "label": en, "label_ar": ar}

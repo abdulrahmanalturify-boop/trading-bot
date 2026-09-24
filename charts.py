@@ -168,13 +168,13 @@ def price_chart(d, chart_type="Candles", overlays=(), panels=(), intraday=False,
 # =====================================================================
 # Visualizations
 # =====================================================================
-def gauge(score, title="Technical Rating"):
+def gauge(score, title="Technical Rating", ticks=("Strong Sell", "Sell", "Neutral", "Buy", "Strong Buy")):
     val = (score + 1) * 50
     fig = go.Figure(go.Indicator(
         mode="gauge+number", value=val, number=dict(suffix="", font=dict(size=28)),
         title=dict(text=title, font=dict(size=13, color=MUTED)),
         gauge=dict(axis=dict(range=[0, 100], tickvals=[10, 30, 50, 70, 90],
-                             ticktext=["Strong Sell", "Sell", "Neutral", "Buy", "Strong Buy"],
+                             ticktext=list(ticks),
                              tickfont=dict(size=9)),
                    bar=dict(color=TEXT, thickness=0.25), bgcolor=BG, borderwidth=0,
                    steps=[dict(range=[0, 25], color="#5c1a1d"), dict(range=[25, 45], color="#3d2224"),
@@ -194,24 +194,37 @@ def score_gauge(total, title):
     return style(fig, 240, legend=False)
 
 
-def treemap(df):
-    """df: Symbol, Sector, Chg %, Size."""
-    labels = list(df["Sector"].unique()) + list(df["Symbol"])
-    parents = [""] * df["Sector"].nunique() + list(df["Sector"])
-    sec_size = df.groupby("Sector")["Size"].sum()
-    w = df.assign(_w=df["Chg %"] * df["Size"]).groupby("Sector")[["_w", "Size"]].sum()
-    sec_chg = w["_w"] / w["Size"]
-    values = [sec_size[s] for s in df["Sector"].unique()] + list(df["Size"])
-    colors = [sec_chg[s] for s in df["Sector"].unique()] + list(df["Chg %"])
-    text = [f"{c:+.2f}%" for c in colors]
+def treemap(df, root="US Market", height=640):
+    """df: Symbol, Name, Sector, SectorLabel, Industry, Chg %, Cap. Sector -> Industry -> Stock (click to drill down)."""
+    ids, labels, parents, values, colors, text, custom = [], [], [], [], [], [], []
+
+    def wavg(g):
+        return float(np.average(g["Chg %"], weights=g["Cap"])) if g["Cap"].sum() > 0 else float(g["Chg %"].mean())
+
+    ids.append("root"); labels.append(root); parents.append(""); values.append(float(df["Cap"].sum()))
+    colors.append(wavg(df)); text.append(f"{wavg(df):+.2f}%"); custom.append("")
+    for sec, g in df.groupby("Sector"):
+        sid = f"s:{sec}"
+        ids.append(sid); labels.append(g["SectorLabel"].iloc[0]); parents.append("root")
+        values.append(float(g["Cap"].sum())); colors.append(wavg(g)); text.append(f"{wavg(g):+.2f}%"); custom.append("")
+        for ind, h in g.groupby("Industry"):
+            iid = f"i:{sec}:{ind}"
+            ids.append(iid); labels.append(ind); parents.append(sid)
+            values.append(float(h["Cap"].sum())); colors.append(wavg(h)); text.append(f"{wavg(h):+.2f}%"); custom.append("")
+            for _, r in h.iterrows():
+                ids.append(f"t:{r['Symbol']}"); labels.append(r["Symbol"]); parents.append(iid)
+                values.append(float(r["Cap"])); colors.append(float(r["Chg %"])); text.append(f"{r['Chg %']:+.2f}%")
+                custom.append(r["Name"])
     fig = go.Figure(go.Treemap(
-        labels=labels, parents=parents, values=values, branchvalues="total", text=text,
-        texttemplate="<b>%{label}</b><br>%{text}", hovertemplate="<b>%{label}</b><br>%{text}<extra></extra>",
-        marker=dict(colors=colors, colorscale=[[0, "#B3262B"], [0.5, "#2A3040"], [1, "#00A574"]],
-                    cmid=0, cmin=-3, cmax=3, line=dict(width=1, color=BG)),
-        tiling=dict(pad=2)))
-    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0))
-    return style(fig, 520, legend=False)
+        ids=ids, labels=labels, parents=parents, values=values, branchvalues="total", text=text, customdata=custom,
+        texttemplate="<b>%{label}</b><br>%{text}", textposition="middle center",
+        hovertemplate="<b>%{label}</b> %{customdata}<br>%{text}<extra></extra>",
+        marker=dict(colors=colors, colorscale=[[0, "#F23645"], [0.35, "#8B1E28"], [0.5, "#2A2F3D"], [0.65, "#0F6B45"], [1, "#089981"]],
+                    cmid=0, cmin=-3, cmax=3, line=dict(width=1, color=BG), pad=dict(t=22, l=3, r=3, b=3)),
+        pathbar=dict(visible=True, thickness=24, textfont=dict(size=12)), maxdepth=4, tiling=dict(pad=2),
+        insidetextfont=dict(color="#fff"), root=dict(color=BG)))
+    fig.update_layout(margin=dict(l=0, r=0, t=0, b=0), uniformtext=dict(minsize=9, mode="hide"))
+    return style(fig, height, legend=False)
 
 
 def hbar(labels, values, title=None, height=None, suffix="%"):
@@ -238,57 +251,57 @@ def line(series, title=None, color=ACCENT, height=220, fill=True):
     return fig
 
 
-def equity_chart(eq, bench):
+def equity_chart(eq, bench, names=("Strategy", "Buy & Hold", "Drawdown %")):
     dd = (eq / eq.cummax() - 1) * 100
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-    fig.add_trace(go.Scatter(x=eq.index, y=eq, name="Strategy", line=dict(color=UP, width=2)), 1, 1)
-    fig.add_trace(go.Scatter(x=bench.index, y=bench, name="Buy & Hold", line=dict(color=MUTED, width=1.3, dash="dot")), 1, 1)
-    fig.add_trace(go.Scatter(x=dd.index, y=dd, name="Drawdown %", fill="tozeroy",
+    fig.add_trace(go.Scatter(x=eq.index, y=eq, name=names[0], line=dict(color=UP, width=2)), 1, 1)
+    fig.add_trace(go.Scatter(x=bench.index, y=bench, name=names[1], line=dict(color=MUTED, width=1.3, dash="dot")), 1, 1)
+    fig.add_trace(go.Scatter(x=dd.index, y=dd, name=names[2], fill="tozeroy",
                              line=dict(color=DOWN, width=1), fillcolor=rgba(DOWN, 0.2)), 2, 1)
     fig.update_yaxes(title_text="Equity $", row=1, col=1, title_font=dict(size=10, color=MUTED))
     fig.update_yaxes(title_text="DD %", row=2, col=1, title_font=dict(size=10, color=MUTED))
     return style(fig, 460)
 
 
-def monthly_heatmap(table):
-    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+def monthly_heatmap(table, title="Monthly Returns", months=None):
+    months = months or ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     z = table.values.astype(float)
     text = [[("" if np.isnan(v) else f"{v:+.1f}%") for v in row] for row in z]
     fig = go.Figure(go.Heatmap(z=z, x=months, y=[str(y) for y in table.index], text=text, texttemplate="%{text}",
                                colorscale=[[0, "#B3262B"], [0.5, "#1A2130"], [1, "#00A574"]], zmid=0,
                                showscale=False, hovertemplate="%{y} %{x}: %{text}<extra></extra>"))
-    style(fig, 90 + 38 * len(table), "Monthly Returns", legend=False)
+    style(fig, 90 + 38 * len(table), title, legend=False)
     fig.update_yaxes(side="left", autorange="reversed")
     return fig
 
 
-def optimizer_heatmap(grid, xname, yname, metric):
+def optimizer_heatmap(grid, xname, yname, metric, title=None):
     z = grid.values.astype(float)
     text = [[("" if np.isnan(v) else f"{v:.1f}") for v in row] for row in z]
     fig = go.Figure(go.Heatmap(z=z, x=[str(c) for c in grid.columns], y=[str(i) for i in grid.index], text=text,
                                texttemplate="%{text}", zmid=0 if "Drawdown" not in metric else None,
                                colorscale=[[0, "#B3262B"], [0.5, "#1A2130"], [1, "#00A574"]],
                                colorbar=dict(title=metric, thickness=10)))
-    style(fig, 420, f"{metric} by parameters", legend=False)
+    style(fig, 420, title or f"{metric} by parameters", legend=False)
     fig.update_xaxes(title_text=xname, type="category")
     fig.update_yaxes(title_text=yname, side="left", type="category")
     return fig
 
 
-def trade_bars(trades):
+def trade_bars(trades, title="P&L per trade (%)"):
     fig = go.Figure(go.Bar(x=[f"#{i + 1}" for i in range(len(trades))], y=trades["P&L %"],
                            marker_color=[UP if v >= 0 else DOWN for v in trades["P&L %"]],
                            text=[f"{v:+.1f}%" for v in trades["P&L %"]], textposition="outside",
                            hovertext=trades["Exit Reason"]))
-    return style(fig, 320, "P&L per trade (%)", legend=False)
+    return style(fig, 320, title, legend=False)
 
 
-def cumulative_pnl(trades):
+def cumulative_pnl(trades, title="Cumulative P&L ($)", xlab="Trade #"):
     c = trades["P&L $"].cumsum()
     fig = go.Figure(go.Scatter(x=list(range(1, len(c) + 1)), y=c, mode="lines+markers",
                                line=dict(color=ACCENT, width=2), fill="tozeroy", fillcolor=rgba(ACCENT, 0.13)))
-    style(fig, 300, "Cumulative P&L ($)", legend=False)
-    fig.update_xaxes(title_text="Trade #")
+    style(fig, 300, title, legend=False)
+    fig.update_xaxes(title_text=xlab)
     return fig
 
 
@@ -303,7 +316,7 @@ def histogram(values, title, color=ACCENT):
     return style(fig, 300, title, legend=False)
 
 
-def scan_scatter(res):
+def scan_scatter(res, title="Momentum map: 1-month return vs RSI (bubble = volume, color = score)"):
     d = res.dropna(subset=["RSI", "1M %"])
     size = d["Vol ×"].fillna(1).clip(0.5, 5) * 9
     fig = go.Figure(go.Scatter(
@@ -315,14 +328,14 @@ def scan_scatter(res):
     fig.add_hline(y=70, line=dict(color=DOWN, dash="dot", width=0.8))
     fig.add_hline(y=30, line=dict(color=UP, dash="dot", width=0.8))
     fig.add_vline(x=0, line=dict(color=MUTED, dash="dot", width=0.8))
-    style(fig, 460, "Momentum map: 1-month return vs RSI (bubble = volume, color = score)", legend=False)
+    style(fig, 460, title, legend=False)
     fig.update_layout(hovermode="closest")
     fig.update_xaxes(title_text="1M return %", showgrid=True, gridcolor=BORDER)
     fig.update_yaxes(title_text="RSI", side="left")
     return fig
 
 
-def returns_bars(d):
+def returns_bars(d, title="Performance"):
     c = d["Close"]
     periods = {"1W": 5, "1M": 21, "3M": 63, "6M": 126, "1Y": 252}
     labels, vals = [], []
@@ -336,10 +349,10 @@ def returns_bars(d):
         vals.append((c.iloc[-1] / ytd.iloc[0] - 1) * 100)
     fig = go.Figure(go.Bar(x=labels, y=vals, marker_color=[UP if v >= 0 else DOWN for v in vals],
                            text=[f"{v:+.1f}%" for v in vals], textposition="outside"))
-    return style(fig, 280, "Performance", legend=False)
+    return style(fig, 280, title, legend=False)
 
 
-def rec_chart(rec):
+def rec_chart(rec, title="Analyst recommendations"):
     cols = [("strongBuy", "Strong Buy", "#00A574"), ("buy", "Buy", "#5CD6A8"), ("hold", "Hold", GOLD),
             ("sell", "Sell", "#FF8A80"), ("strongSell", "Strong Sell", DOWN)]
     fig = go.Figure()
@@ -348,10 +361,10 @@ def rec_chart(rec):
         if key in rec:
             fig.add_trace(go.Bar(x=periods, y=rec[key], name=name, marker_color=color))
     fig.update_layout(barmode="stack")
-    return style(fig, 300, "Analyst recommendations")
+    return style(fig, 300, title)
 
 
-def target_chart(price, t):
+def target_chart(price, t, title="12-month price targets"):
     fig = go.Figure()
     lo, hi = t.get("low"), t.get("high")
     if lo and hi:
@@ -366,13 +379,13 @@ def target_chart(price, t):
     if price:
         fig.add_trace(go.Scatter(x=[price], y=[0], mode="markers+text", name="Current", text=[f"Now<br>${price:,.0f}"],
                                  textposition="bottom center", marker=dict(size=16, color=TEXT, symbol="diamond")))
-    style(fig, 220, "12-month price targets", legend=False)
+    style(fig, 220, title, legend=False)
     fig.update_yaxes(visible=False, range=[-1, 1])
     fig.update_layout(hovermode="closest")
     return fig
 
 
-def eps_chart(eh):
+def eps_chart(eh, title="EPS: estimate vs actual"):
     est = next((c for c in eh.columns if "Estimate" in c), None)
     rep = next((c for c in eh.columns if "Reported" in c), None)
     if not est or not rep:
@@ -384,12 +397,12 @@ def eps_chart(eh):
                              marker=dict(size=14, color="rgba(0,0,0,0)", line=dict(color=MUTED, width=2))))
     fig.add_trace(go.Scatter(x=x, y=e[rep], mode="markers", name="Actual",
                              marker=dict(size=12, color=[UP if a >= b else DOWN for a, b in zip(e[rep], e[est])])))
-    style(fig, 300, "EPS: estimate vs actual")
+    style(fig, 300, title)
     fig.update_xaxes(type="category")
     return fig
 
 
-def income_chart(inc):
+def income_chart(inc, title="Quarterly results ($B)"):
     rows = {"Total Revenue": ACCENT, "Gross Profit": GOLD, "Net Income": UP}
     fig = go.Figure()
     cols = list(inc.columns)[:6][::-1]
@@ -398,6 +411,6 @@ def income_chart(inc):
         if r in inc.index:
             fig.add_trace(go.Bar(x=x, y=[inc.loc[r, c] / 1e9 for c in cols], name=r, marker_color=color))
     fig.update_layout(barmode="group")
-    style(fig, 320, "Quarterly results ($B)")
+    style(fig, 320, title)
     fig.update_xaxes(type="category")
     return fig
