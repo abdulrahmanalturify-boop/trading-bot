@@ -11,10 +11,11 @@ import charts
 import data
 import engine
 import ta
+import taxonomy as X
 import theme as T
 import ui
 import universe as U
-from i18n import L, is_ar, sector_name, sig
+from i18n import L, industry_name, is_ar, sector_name, sig, theme_name
 
 ss = st.session_state
 
@@ -36,11 +37,15 @@ def quote_header(sym, daily, inf):
     chg, pct = last - prev, (last / prev - 1) * 100
     name = inf.get("longName") or inf.get("shortName") or U.name_of(sym)
     exch = inf.get("fullExchangeName") or inf.get("exchange") or ""
-    sec = inf.get("sector") or (U.sector_of(sym) if sym in U.STOCKS else "")
-    ind = inf.get("industry") or (U.industry_of(sym) if sym in U.STOCKS else "")
-    badges = (T.badge(sector_name(sec), "acc", "category") if sec else "") + (T.badge(ind, "gold", "factory") if ind else "")
-    ui.html(f'<div class="q-name">{T.esc(name)} · <b>{sym}</b> · {T.esc(exch)} {badges}</div>'
-            f'<div><span class="q-price">{T.fmt_price(last)}</span> <span class="muted">{inf.get("currency", "USD")}</span></div>'
+    sec = inf.get("sector") or (U.sector_of(sym) if U.known(sym) else "")
+    ind = inf.get("industry") or (U.industry_of(sym) if U.known(sym) else "")
+    badges = (T.badge(sector_name(sec), "acc", "category") if sec else "") + (T.badge(industry_name(ind), "vio", "factory") if ind else "")
+    for tk, sk in X.themes_of(sym)[:2]:
+        badges += T.badge(theme_name(tk, sk), "gold", X.THEMES[tk][2])
+    uri = data.logos([sym]).get(sym)
+    ui.html(f'<div style="display:flex;gap:14px;align-items:center">{T.logo_circle(sym, uri, 58)}<div>'
+            f'<div class="q-name"><b style="color:#fff;font-size:1.15rem">{T.esc(name)}</b> · {sym} · {T.esc(exch)}</div><div>{badges}</div></div></div>'
+            f'<div style="margin-top:6px"><span class="q-price">{T.fmt_price(last)}</span> <span class="muted">{inf.get("currency", "USD")}</span></div>'
             f'<div><span class="q-chg {T.cls(chg)}">{chg:+,.2f} ({pct:+.2f}%)</span> '
             f'<span class="muted" style="font-size:.85rem">· {daily.index[-1]:%Y-%m-%d} · </span>{T.market_status(is_ar())}</div>')
     return last
@@ -208,6 +213,184 @@ def analysts_tab(sym, inf, price):
     st.dataframe(ins.head(15), hide_index=True, height=300) if isinstance(ins, pd.DataFrame) and not ins.empty else st.caption("—")
 
 
+def company_tab(sym):
+    p = data.profile(sym)
+    ui.sec("apartment", "Company description", "نبذة عن الشركة")
+    summary = p["summary"]
+    if summary:
+        if is_ar():
+            with st.spinner("جاري ترجمة النبذة..."):
+                tr = data.translate_long(summary)
+            ui.html(f'<div class="card rtl"><div class="desc">{T.esc(tr)}</div></div>')
+            if tr == summary:
+                st.caption("خدمة الترجمة مشغولة حالياً؛ نعرض النص الأصلي.")
+            with st.expander("النص الأصلي بالإنجليزي"):
+                st.write(summary)
+        else:
+            ui.html(f'<div class="card"><div class="desc">{T.esc(summary)}</div></div>')
+    else:
+        st.caption(L("No description available for this symbol.", "لا توجد نبذة متاحة لهذا الرمز."))
+
+    ui.sec("category", "Classification", "التصنيف")
+    th = X.themes_of(sym)
+    sub = X.SUBIND.get(sym)
+    items = [("category", L("Sector", "القطاع"), sector_name(p["sector"]) if p["sector"] else "—"),
+             ("factory", L("Industry", "الصناعة"), industry_name(p["industry"]) if p["industry"] else "—"),
+             ("account_tree", L("Sub-industry", "الصناعة الفرعية"), L(sub[0], sub[1]) if sub else "—"),
+             ("lightbulb", L("Themes", "الثيمات الاستثمارية"), " · ".join(dict.fromkeys(theme_name(t) for t, _ in th)) or "—"),
+             ("label", L("Sub-themes", "الثيمات الفرعية"), " · ".join(theme_name(t, s_) for t, s_ in th) or "—"),
+             ("location_city", L("Headquarters", "المقر الرئيسي"), p["hq"] or "—"),
+             ("groups", L("Employees", "الموظفون"), f"{p['employees']:,}" if p["employees"] else "—"),
+             ("person", L("CEO", "الرئيس التنفيذي"), p["ceo"] or "—"),
+             ("storefront", L("Exchange", "السوق"), p["exchange"] or "—")]
+    web = f'<a href="{T.esc(p["website"])}" target="_blank" style="color:#7EA6FF">{T.esc(p["website"])}</a>' if p["website"] else "—"
+    ui.html('<div class="prof">' + "".join(f'<div class="it"><div class="l">{T.icon(ic)}{T.esc(l)}</div><div class="v">{T.esc(v)}</div></div>'
+                                           for ic, l, v in items)
+            + f'<div class="it"><div class="l">{T.icon("language")}{L("Website", "الموقع الإلكتروني")}</div><div class="v">{web}</div></div></div>')
+    if p["officers"]:
+        ui.sec("badge", "Key executives", "كبار التنفيذيين")
+        off = pd.DataFrame([{L("Name", "الاسم"): o.get("name"), L("Title", "المنصب"): o.get("title"),
+                             L("Age", "العمر"): o.get("age")} for o in p["officers"]])
+        st.dataframe(off, hide_index=True)
+    if p["industry"]:
+        peers = [s for s, v in U.STOCKS.items() if v[2] == p["industry"] and s != sym][:8]
+        if peers:
+            ui.sec("hub", "Peers in the same industry", "شركات منافسة في نفس الصناعة")
+            ch = data.changes(peers)
+            df = pd.DataFrame([{"Symbol": s, "Name": U.name_of(s), "Price": ch.get(s, (np.nan, np.nan))[0], "Chg %": ch.get(s, (np.nan, np.nan))[1]} for s in peers])
+            ui.html(f'<div class="card">{ui.row_list(df, data.logos(peers))}</div>')
+
+
+def _max_pain(calls, puts):
+    strikes = sorted(set(calls.get("strike", pd.Series(dtype=float))) | set(puts.get("strike", pd.Series(dtype=float))))
+    if not strikes:
+        return None
+    co, po = calls.fillna(0), puts.fillna(0)
+    pain = [(k * 0 + (co["openInterest"] * np.maximum(k - co["strike"], 0)).sum() + (po["openInterest"] * np.maximum(po["strike"] - k, 0)).sum(), k)
+            for k in strikes]
+    return min(pain)[1]
+
+
+def _chain_html(calls, puts, price, n):
+    c = calls.set_index("strike") if not calls.empty else pd.DataFrame()
+    p = puts.set_index("strike") if not puts.empty else pd.DataFrame()
+    strikes = sorted(set(c.index) | set(p.index))
+    if not strikes:
+        return ""
+    atm = min(range(len(strikes)), key=lambda i: abs(strikes[i] - price))
+    if n:
+        strikes = strikes[max(0, atm - n): atm + n + 1]
+    cols = ["bid", "ask", "lastPrice", "percentChange", "volume", "openInterest", "impliedVolatility"]
+    hdr = [L("Bid", "العرض"), L("Ask", "الطلب"), L("Last", "آخر"), L("Chg%", "التغير%"), L("Vol", "الحجم"), L("OI", "العقود المفتوحة"), "IV"]
+
+    def cell(df, k, col, side):
+        if df.empty or k not in df.index:
+            return "<td>—</td>"
+        v = df.loc[k, col]
+        if isinstance(v, pd.Series):
+            v = v.iloc[0]
+        itm = (side == "c" and k < price) or (side == "p" and k > price)
+        klass = f' class="itm-{side}"' if itm else ""
+        if pd.isna(v):
+            txt = "—"
+        elif col == "impliedVolatility":
+            txt = f"{v * 100:.1f}%"
+        elif col == "percentChange":
+            txt = f'<span class="{T.cls(v)}">{v:+.1f}%</span>'
+        elif col in ("volume", "openInterest"):
+            txt = f"{int(v):,}"
+        else:
+            txt = f"{v:,.2f}"
+        return f"<td{klass}>{txt}</td>"
+    rows = []
+    above = False
+    for k in strikes:
+        atm_cls = ""
+        if not above and k >= price:
+            atm_cls, above = ' class="atm"', True
+        rows.append(f"<tr{atm_cls}>" + "".join(cell(c, k, col, "c") for col in reversed(cols)) + f'<td class="k">{k:,.2f}</td>'
+                    + "".join(cell(p, k, col, "p") for col in cols) + "</tr>")
+    head = (f'<tr><th class="side" colspan="7" style="color:{T.UP}">{L("CALLS", "عقود الشراء CALL")}</th><th class="side">{L("Strike", "سعر التنفيذ")}</th>'
+            f'<th class="side" colspan="7" style="color:{T.DOWN}">{L("PUTS", "عقود البيع PUT")}</th></tr><tr>'
+            + "".join(f"<th>{h}</th>" for h in reversed(hdr)) + f'<th style="text-align:center">$</th>' + "".join(f"<th>{h}</th>" for h in hdr) + "</tr>")
+    return f'<div class="chainwrap"><table class="chain"><thead>{head}</thead><tbody>{"".join(rows)}</tbody></table></div>'
+
+
+def options_tab(sym, price):
+    exps = data.expirations(sym)
+    if not exps:
+        st.info(L("No listed options for this symbol.", "لا توجد عقود خيارات مدرجة لهذا الرمز."), icon=":material/info:")
+        return
+    today = pd.Timestamp.now().normalize()
+
+    def lab(e):
+        d = (pd.Timestamp(e) - today).days
+        return f"{pd.Timestamp(e):%b %d, %Y} · {d}{L('d', ' يوم')}"
+    c1, c2, c3 = st.columns([1.4, 1, 1])
+    exp = c1.selectbox(L("Expiration", "تاريخ الانتهاء"), exps[:24], format_func=lab)
+    rng = c2.segmented_control(L("Strikes", "أسعار التنفيذ"), [8, 15, 30, 0], default=15, key="op_rng",
+                               format_func=lambda n: L("All", "الكل") if n == 0 else f"±{n}") or 15
+    view = c3.segmented_control(L("View", "العرض"), ["chain", "calls", "puts"], default="chain", key="op_view",
+                                format_func=lambda v: {"chain": L("T-Chain", "الجدول الكامل"), "calls": "Calls", "puts": "Puts"}[v]) or "chain"
+    with st.spinner(L("Loading option chain...", "جاري تحميل سلسلة الخيارات...")):
+        calls, puts = data.option_chain(sym, exp)
+    if calls.empty and puts.empty:
+        st.warning(L("Option chain unavailable right now.", "سلسلة الخيارات غير متاحة حالياً."))
+        return
+    dte = max((pd.Timestamp(exp) - today).days, 0)
+    atm_k = min(set(calls["strike"]) | set(puts["strike"]), key=lambda k: abs(k - price))
+
+    def mid(df, k):
+        r = df[df["strike"] == k]
+        if r.empty:
+            return np.nan
+        r = r.iloc[0]
+        return (r["bid"] + r["ask"]) / 2 if r["bid"] > 0 and r["ask"] > 0 else r["lastPrice"]
+    straddle = np.nansum([mid(calls, atm_k), mid(puts, atm_k)])
+    atm_iv = np.nanmean([calls.loc[calls["strike"] == atm_k, "impliedVolatility"].mean(), puts.loc[puts["strike"] == atm_k, "impliedVolatility"].mean()])
+    pc_vol = puts["volume"].fillna(0).sum() / max(calls["volume"].fillna(0).sum(), 1)
+    pc_oi = puts["openInterest"].fillna(0).sum() / max(calls["openInterest"].fillna(0).sum(), 1)
+    mp = _max_pain(calls, puts)
+    m = st.columns(6)
+    m[0].metric(L("Underlying", "سعر السهم"), f"${price:,.2f}", L(f"{dte} days to expiry", f"{dte} يوم للانتهاء"), delta_color="off")
+    m[1].metric(L("ATM implied vol.", "التذبذب الضمني"), f"{atm_iv * 100:.1f}%" if pd.notna(atm_iv) else "—")
+    m[2].metric(L("Expected move", "الحركة المتوقعة"), f"±${straddle:,.2f}", f"±{straddle / price * 100:.1f}%", delta_color="off")
+    m[3].metric(L("Put/Call volume", "نسبة PUT/CALL حجم"), f"{pc_vol:.2f}")
+    m[4].metric(L("Put/Call open int.", "نسبة PUT/CALL عقود"), f"{pc_oi:.2f}")
+    m[5].metric(L("Max pain", "نقطة الألم القصوى"), f"${mp:,.2f}" if mp else "—")
+    st.caption(L("Expected move = at-the-money straddle price. Max pain = strike where option holders lose the most at expiration. "
+                 "Shaded cells are in the money.",
+                 "الحركة المتوقعة = سعر الستراديل عند سعر السوق. نقطة الألم القصوى = السعر الذي يخسر عنده حاملو العقود أكثر شيء عند الانتهاء. "
+                 "الخانات المظللة داخل السعر (In the money)."))
+    if view == "chain":
+        ui.html(_chain_html(calls, puts, price, rng))
+    else:
+        df = calls if view == "calls" else puts
+        cols = ["contractSymbol", "strike", "lastPrice", "bid", "ask", "percentChange", "volume", "openInterest", "impliedVolatility", "inTheMoney"]
+        df = df[[c for c in cols if c in df]].copy()
+        if rng:
+            i = (df["strike"] - price).abs().idxmin()
+            pos = df.index.get_loc(i)
+            df = df.iloc[max(0, pos - rng): pos + rng + 1]
+        df["impliedVolatility"] = df["impliedVolatility"] * 100
+        st.dataframe(df.style.map(T.color_style, subset=["percentChange"]).format(
+            {"strike": "{:,.2f}", "lastPrice": "{:,.2f}", "bid": "{:,.2f}", "ask": "{:,.2f}", "percentChange": "{:+.1f}%", "impliedVolatility": "{:.1f}%",
+             "volume": "{:,.0f}", "openInterest": "{:,.0f}"}, na_rep="—"), hide_index=True, height=520)
+    a, b = st.columns(2)
+    win = lambda d: d[(d["strike"] > price * 0.7) & (d["strike"] < price * 1.3)]
+    a.plotly_chart(charts.oi_by_strike(win(calls), win(puts), price, L("Open interest by strike", "العقود المفتوحة حسب سعر التنفيذ"),
+                                       (L("Calls", "شراء"), L("Puts", "بيع"))))
+    b.plotly_chart(charts.iv_smile(win(calls), win(puts), price, L("Implied volatility smile", "منحنى التذبذب الضمني"),
+                                   (L("Calls IV", "تذبذب الشراء"), L("Puts IV", "تذبذب البيع"))))
+    ui.sec("local_fire_department", "Most active contracts", "العقود الأكثر تداولاً")
+    act = pd.concat([calls.assign(Type="CALL"), puts.assign(Type="PUT")])
+    act = act.sort_values("volume", ascending=False).head(10)[["Type", "contractSymbol", "strike", "lastPrice", "percentChange", "volume", "openInterest", "impliedVolatility"]]
+    act["impliedVolatility"] = act["impliedVolatility"] * 100
+    st.dataframe(act.style.map(T.color_style, subset=["percentChange"]).format(
+        {"strike": "{:,.2f}", "lastPrice": "{:,.2f}", "percentChange": "{:+.1f}%", "impliedVolatility": "{:.1f}%", "volume": "{:,.0f}",
+         "openInterest": "{:,.0f}"}, na_rep="—"), hide_index=True)
+
+
 def page_stock():
     sym = ss.symbol
     with st.spinner(L(f"Loading {sym}...", f"جاري تحميل {sym}...")):
@@ -221,28 +404,34 @@ def page_stock():
         price = quote_header(sym, daily, inf)
     with h2:
         if sym not in ss.watchlist:
-            if st.button(L("Add to watchlist", "أضف للمتابعة"), icon=":material/star:"):
+            if st.button(L("Add to watchlist", "أضف للمتابعة"), icon=":material/star:", width="stretch"):
                 ss.watchlist.append(sym)
                 st.rerun()
         else:
-            st.button(L("In watchlist", "في المتابعة"), icon=":material/star:", disabled=True)
-        if st.button("Catalyst Pro", icon=":material/bolt:"):
+            st.button(L("In watchlist", "في المتابعة"), icon=":material/star:", disabled=True, width="stretch")
+        if st.button("Catalyst Pro", icon=":material/bolt:", width="stretch"):
             ui.goto("catalyst")
     key_stats(daily, inf)
     tabs = st.tabs([L(":material/candlestick_chart: Chart", ":material/candlestick_chart: الرسم البياني"),
+                    L(":material/apartment: Company", ":material/apartment: عن الشركة"),
                     L(":material/speed: Technicals", ":material/speed: التحليل الفني"),
                     L(":material/request_quote: Financials", ":material/request_quote: المالية"),
                     L(":material/groups: Analysts", ":material/groups: المحللون"),
+                    L(":material/tune: Options", ":material/tune: الخيارات"),
                     L(":material/newspaper: News", ":material/newspaper: الأخبار")])
     with tabs[0]:
         chart_tab(sym, daily)
     with tabs[1]:
-        technicals_tab(daily)
+        company_tab(sym)
     with tabs[2]:
-        financials_tab(sym, inf)
+        technicals_tab(daily)
     with tabs[3]:
-        analysts_tab(sym, inf, price)
+        financials_tab(sym, inf)
     with tabs[4]:
+        analysts_tab(sym, inf, price)
+    with tabs[5]:
+        options_tab(sym, float(price))
+    with tabs[6]:
         ui.news_list(data.news(sym, 20), 15)
     ui.foot()
 
@@ -316,6 +505,8 @@ PRESETS = {
     "dividend": ("Dividend payers > 4%", "توزيعات أكثر من 4%", {"div": 4, "mcap": 2}),
     "shorts": ("High short interest", "بيع على المكشوف مرتفع", {"short": 2, "avgvol": 3}),
     "value": ("Undervalued growth", "نمو بتقييم منخفض", {"pe": 1, "epsg": 2, "revg": 1}),
+    "ai": ("AI leaders", "قادة الذكاء الاصطناعي", {"theme": "ai"}),
+    "nuclear": ("Clean energy & nuclear", "الطاقة النظيفة والنووية", {"theme": "power"}),
 }
 
 
@@ -323,6 +514,8 @@ def _apply_preset():
     p = PRESETS[ss.sc_preset][2]
     for k in F:
         ss[f"sf_{k}"] = p.get(k, 0)
+    ss["sf_theme"] = p.get("theme", "Any")
+    ss["sf_subtheme"] = "Any"
 
 
 def _local_filters(df):
@@ -353,74 +546,95 @@ def _technicals(symbols):
     return pd.DataFrame(rows)
 
 
+def _theme_opts():
+    return ["Any"] + list(X.THEMES)
+
+
 def page_screener():
     ui.header("filter_alt", "Stock Screener", "فلتر الأسهم",
-              "Filter the entire US market by valuation, growth, dividends, short interest and technicals (Finviz-style).",
-              "فلترة السوق الأمريكي كامل حسب التقييم والنمو والتوزيعات والبيع على المكشوف والتحليل الفني.")
+              "Filter the entire US market by sector, industry, investment theme, valuation, growth, dividends, short interest and technicals.",
+              "فلترة السوق الأمريكي كامل حسب القطاع والصناعة والثيم الاستثماري والتقييم والنمو والتوزيعات والبيع على المكشوف والتحليل الفني.")
     top = st.columns([1.4, 1, 1, 0.8])
     top[0].selectbox(L("Preset", "قالب جاهز"), list(PRESETS), key="sc_preset", on_change=_apply_preset,
                      format_func=lambda k: L(PRESETS[k][0], PRESETS[k][1]))
     sort = top[1].selectbox(L("Order by", "ترتيب حسب"), list(SORTS), format_func=lambda k: L(SORTS[k][0], SORTS[k][1]))
     size = top[2].selectbox(L("Results", "عدد النتائج"), [50, 100, 250], index=1)
     top[3].write("")
-    run = top[3].button(L("Screen", "ابحث"), type="primary", icon=":material/search:")
+    run = top[3].button(L("Screen", "ابحث"), type="primary", icon=":material/search:", width="stretch")
+
+    # ---- classification row (always visible): sector · industry · theme · sub-theme
+    c = st.columns(4)
+    c[0].selectbox(L("Sector", "القطاع"), ["Any"] + U.SECTORS, key="sf_sector",
+                   format_func=lambda s_: L("Any", "الكل") if s_ == "Any" else sector_name(s_))
+    sec = ss.get("sf_sector", "Any")
+    iopts = ["Any"] + (U.INDUSTRIES.get(sec, []) if sec != "Any" else [])
+    if ss.get("sf_industry") not in iopts:
+        ss["sf_industry"] = "Any"
+    c[1].selectbox(L("Industry", "الصناعة"), iopts, key="sf_industry", disabled=sec == "Any",
+                   format_func=lambda s_: L("Any", "الكل") if s_ == "Any" else industry_name(s_))
+    c[2].selectbox(L("Theme", "الثيم الاستثماري"), _theme_opts(), key="sf_theme",
+                   format_func=lambda t: L("Any", "الكل") if t == "Any" else theme_name(t))
+    th = ss.get("sf_theme", "Any")
+    sopts = ["Any"] + (list(X.THEMES[th][3]) if th != "Any" else [])
+    if ss.get("sf_subtheme") not in sopts:
+        ss["sf_subtheme"] = "Any"
+    c[3].selectbox(L("Sub-theme", "الثيم الفرعي"), sopts, key="sf_subtheme", disabled=th == "Any",
+                   format_func=lambda k: L("Any", "الكل") if k == "Any" else theme_name(th, k))
 
     groups = {"desc": L("Descriptive", "وصفية"), "fund": L("Fundamental", "أساسية"), "tech": L("Technical", "فنية")}
     tabs = st.tabs(list(groups.values()))
     for tab, g in zip(tabs, groups):
         with tab:
             keys = [k for k, v in F.items() if v[2] == g or (g == "tech" and v[2] == "local")]
-            if g == "desc":
-                keys = ["sector", "industry"] + keys
             cols = st.columns(4)
             for i, k in enumerate(keys):
-                col = cols[i % 4]
-                if k == "sector":
-                    col.selectbox(L("Sector", "القطاع"), ["Any"] + U.SECTORS, key="sf_sector",
-                                  format_func=lambda s: L("Any", "الكل") if s == "Any" else sector_name(s))
-                elif k == "industry":
-                    sec = ss.get("sf_sector", "Any")
-                    opts = ["Any"] + (U.INDUSTRIES.get(sec, []) if sec != "Any" else [])
-                    if ss.get("sf_industry") not in opts:
-                        ss["sf_industry"] = "Any"
-                    col.selectbox(L("Industry", "الصناعة"), opts, key="sf_industry",
-                                  format_func=lambda s: L("Any", "الكل") if s == "Any" else s, disabled=sec == "Any")
-                else:
-                    en, ar, _, opts = F[k]
-                    ss.setdefault(f"sf_{k}", 0)
-                    col.selectbox(L(en, ar), list(range(len(opts))), key=f"sf_{k}",
-                                  format_func=lambda i, o=opts: L(o[i][0], o[i][1]))
+                en, ar, _, opts = F[k]
+                ss.setdefault(f"sf_{k}", 0)
+                cols[i % 4].selectbox(L(en, ar), list(range(len(opts))), key=f"sf_{k}", format_func=lambda i_, o=opts: L(o[i_][0], o[i_][1]))
 
     active = [(k, ss.get(f"sf_{k}", 0)) for k in F if ss.get(f"sf_{k}", 0)]
-    if ss.get("sf_sector", "Any") != "Any":
-        active.append(("sector", ss.sf_sector))
+    chips = [T.badge(f"{L(F[k][0], F[k][1])}: {L(F[k][3][v][0], F[k][3][v][1])}", "acc", "filter_alt") for k, v in active]
+    if sec != "Any":
+        chips.append(T.badge(sector_name(sec), "acc", "category"))
     if ss.get("sf_industry", "Any") != "Any":
-        active.append(("industry", ss.sf_industry))
-    if active:
-        ui.html(" ".join(T.badge(f"{L(F[k][0], F[k][1])}: {L(F[k][3][v][0], F[k][3][v][1])}" if k in F else
-                                 (sector_name(v) if k == "sector" else v), "gold", "filter_alt") for k, v in active))
+        chips.append(T.badge(industry_name(ss.sf_industry), "vio", "factory"))
+    if th != "Any":
+        chips.append(T.badge(theme_name(th) + ("" if ss.get("sf_subtheme", "Any") == "Any" else f" › {theme_name(th, ss.sf_subtheme)}"), "gold", X.THEMES[th][2]))
+    if chips:
+        ui.html(" ".join(chips))
 
+    theme_syms = X.theme_tickers(th, None if ss.get("sf_subtheme", "Any") == "Any" else ss.sf_subtheme) if th != "Any" else None
     if run or "screen" not in ss:
         filters = []
         for k in F:
             v = ss.get(f"sf_{k}", 0)
             if v and F[k][2] != "local":
                 filters += [list(f) for f in F[k][3][v][2]]
-        if ss.get("sf_sector", "Any") != "Any":
-            filters.append(["eq", "sector", ss.sf_sector])
+        if sec != "Any":
+            filters.append(["eq", "sector", sec])
         if ss.get("sf_industry", "Any") != "Any":
             filters.append(["eq", "industry", ss.sf_industry])
+        if theme_syms and sec == "Any":
+            filters.append(["or_eq", "sector", sorted({U.sector_of(t) for t in theme_syms} - {"Other"})])
         with st.spinner(L("Screening the US market...", "جاري فلترة السوق الأمريكي...")):
-            df, err = data.screen_custom(filters, sort, SORTS[sort][2], size)
+            df, err = data.screen_custom(filters, sort, SORTS[sort][2], 250 if theme_syms else size)
             source = "live"
-            if df.empty:
+            if theme_syms is not None:
+                have = set(df["Symbol"]) if not df.empty else set()
+                df = df[df["Symbol"].isin(theme_syms)] if not df.empty else df
+                missing = [t for t in theme_syms if t not in have]
+                if missing:
+                    ch = data.changes(missing)
+                    extra = pd.DataFrame([{"Symbol": t, "Name": U.name_of(t), "Price": ch[t][0], "Chg %": ch[t][1]} for t in missing if t in ch])
+                    df = pd.concat([df, extra], ignore_index=True) if not df.empty else extra
+            if df.empty and theme_syms is None:
                 source = "fallback"
                 fb = data.changes(tuple(U.US_UNIVERSE))
-                df = pd.DataFrame([{"Symbol": s, "Name": U.name_of(s), "Price": p, "Chg %": c, "Mkt Cap": U.STOCKS[s][3] * 1e9}
-                                   for s, (p, c) in fb.items()])
-                if ss.get("sf_sector", "Any") != "Any" and not df.empty:
-                    df = df[df["Symbol"].map(U.sector_of) == ss.sf_sector]
-        ss.screen = {"df": df, "err": err, "source": source, "time": datetime.now()}
+                df = pd.DataFrame([{"Symbol": s_, "Name": U.name_of(s_), "Price": p_, "Chg %": c_, "Mkt Cap": U.STOCKS[s_][3] * 1e9}
+                                   for s_, (p_, c_) in fb.items()])
+                if sec != "Any" and not df.empty:
+                    df = df[df["Symbol"].map(U.sector_of) == sec]
+        ss.screen = {"df": df, "err": err, "source": source}
 
     res = ss.screen
     df = _local_filters(res["df"].copy()) if not res["df"].empty else res["df"]
@@ -430,14 +644,21 @@ def page_screener():
     if df.empty:
         st.info(L("No stocks match these filters.", "لا توجد أسهم تطابق هذه الفلاتر."))
         return
-    need_tech = ss.get("sf_rsi", 0) > 0
-    tech = _technicals(df["Symbol"].head(150).tolist()) if need_tech or st.session_state.get("sc_view_tech", True) else pd.DataFrame()
+    tech = _technicals(df["Symbol"].head(150).tolist())
     if not tech.empty:
         df = df.merge(tech, on="Symbol", how="left")
-        if need_tech:
-            r = ss.sf_rsi
-            df = df[{1: df["RSI"] < 30, 2: df["RSI"] > 70, 3: df["RSI"].between(40, 60)}[r]]
-    df["Sector"] = df["Symbol"].map(lambda s: sector_name(U.sector_of(s)) if s in U.STOCKS else (sector_name(ss.sf_sector) if ss.get("sf_sector", "Any") != "Any" else "—"))
+        if ss.get("sf_rsi", 0):
+            df = df[{1: df["RSI"] < 30, 2: df["RSI"] > 70, 3: df["RSI"].between(40, 60)}[ss.sf_rsi]]
+    # ---- classification columns
+    with st.spinner(L("Classifying companies...", "جاري تصنيف الشركات...")):
+        cls_map = data.classify(df["Symbol"].tolist(), limit=40)
+    df["_sector"] = df["Symbol"].map(lambda s_: sec if sec != "Any" else (cls_map.get(s_, (None, None))[0]))
+    df["_industry"] = df["Symbol"].map(lambda s_: ss.sf_industry if ss.get("sf_industry", "Any") != "Any" else (cls_map.get(s_, (None, None))[1]))
+    df["Sector"] = df["_sector"].map(lambda v: sector_name(v) if v else "—")
+    df["Industry"] = df["_industry"].map(lambda v: industry_name(v) if v else "—")
+    df["Theme"] = df["Symbol"].map(lambda s_: " · ".join(dict.fromkeys(theme_name(t) for t, _ in X.themes_of(s_))) or "—")
+    df["Sub-theme"] = df["Symbol"].map(lambda s_: " · ".join(theme_name(t, k) for t, k in X.themes_of(s_)) or "—")
+    df.insert(0, "Logo", df["Symbol"].map(data.logo_url))
 
     m = st.columns(4)
     m[0].metric(L("Matches", "النتائج"), len(df))
@@ -445,43 +666,50 @@ def page_screener():
     m[2].metric(L("Median P/E", "وسيط مكرر الربحية"), f"{df['P/E'].median():.1f}" if "P/E" in df and df["P/E"].notna().any() else "—")
     m[3].metric(L("Total market cap", "إجمالي القيمة السوقية"), T.fmt_big(df["Mkt Cap"].sum()) if "Mkt Cap" in df else "—")
 
-    N = {"Symbol": L("Ticker", "الرمز"), "Name": L("Company", "الشركة"), "Sector": L("Sector", "القطاع"), "Mkt Cap": L("Market cap", "القيمة السوقية"),
+    N = {"Symbol": L("Ticker", "الرمز"), "Name": L("Company", "الشركة"), "Sector": L("Sector", "القطاع"), "Industry": L("Industry", "الصناعة"),
+         "Theme": L("Theme", "الثيم"), "Sub-theme": L("Sub-theme", "الثيم الفرعي"), "Mkt Cap": L("Market cap", "القيمة السوقية"),
          "Price": L("Price", "السعر"), "Chg %": L("Change", "التغير"), "Volume": L("Volume", "الحجم"), "P/E": "P/E", "Fwd P/E": "Fwd P/E",
          "P/B": "P/B", "EPS": "EPS", "Div %": L("Dividend", "التوزيعات"), "52W %": L("52W perf", "أداء سنوي"), "Rating": L("Analyst rating", "تقييم المحللين"),
          "Perf W": L("Perf week", "أسبوع"), "Perf M": L("Perf month", "شهر"), "Perf 3M": L("Perf quarter", "3 أشهر"), "Perf YTD": L("Perf YTD", "منذ بداية العام"),
-         "RSI": "RSI", "Volatility": L("Volatility", "التذبذب"), "52W High": L("52W high", "قمة سنوية")}
-    views = {L("Overview", "نظرة عامة"): ["Symbol", "Name", "Sector", "Mkt Cap", "P/E", "Price", "Chg %", "Volume"],
-             L("Valuation", "التقييم"): ["Symbol", "Mkt Cap", "P/E", "Fwd P/E", "P/B", "EPS", "Div %", "Rating"],
-             L("Performance", "الأداء"): ["Symbol", "Price", "Chg %", "Perf W", "Perf M", "Perf 3M", "Perf YTD", "52W %", "RSI", "Volatility"]}
-    fmt = {"Mkt Cap": T.fmt_big, "Volume": T.fmt_big}
+         "RSI": "RSI", "Volatility": L("Volatility", "التذبذب"), "Logo": ""}
+    views = {L("Overview", "نظرة عامة"): ["Logo", "Symbol", "Name", "Sector", "Industry", "Mkt Cap", "P/E", "Price", "Chg %", "Volume"],
+             L("Classification", "التصنيف"): ["Logo", "Symbol", "Name", "Sector", "Industry", "Theme", "Sub-theme"],
+             L("Valuation", "التقييم"): ["Logo", "Symbol", "Mkt Cap", "P/E", "Fwd P/E", "P/B", "EPS", "Div %", "Rating"],
+             L("Performance", "الأداء"): ["Logo", "Symbol", "Price", "Chg %", "Perf W", "Perf M", "Perf 3M", "Perf YTD", "52W %", "RSI", "Volatility"]}
     vt = st.tabs(list(views) + [L("Charts", "الرسوم")])
     for tab, (vname, cols) in zip(vt, views.items()):
         with tab:
-            cols = [c for c in cols if c in df.columns]
+            cols = [c_ for c_ in cols if c_ in df.columns]
             show = df[cols].copy()
-            for c, fn in fmt.items():
-                if c in show:
-                    show[c] = show[c].map(fn)
-            pct_cols = [c for c in ("Chg %", "Perf W", "Perf M", "Perf 3M", "Perf YTD", "52W %") if c in show]
+            for c_ in ("Mkt Cap", "Volume"):
+                if c_ in show:
+                    show[c_] = show[c_].map(T.fmt_big)
+            pct_cols = [c_ for c_ in ("Chg %", "Perf W", "Perf M", "Perf 3M", "Perf YTD", "52W %") if c_ in show]
             show = show.rename(columns=N)
-            st.dataframe(show.style.map(T.color_style, subset=[N[c] for c in pct_cols]).format(
-                {**{N[c]: "{:+.2f}%" for c in pct_cols}, **{N[c]: "{:,.2f}" for c in ("Price", "P/E", "Fwd P/E", "P/B", "EPS") if c in cols},
-                 **({N["Div %"]: "{:.2f}%"} if "Div %" in cols else {}), **({N["RSI"]: "{:.0f}"} if "RSI" in cols else {}),
-                 **({N["Volatility"]: "{:.1f}%"} if "Volatility" in cols else {})}, na_rep="—"),
-                hide_index=True, height=520)
+            fmt = {**{N[c_]: "{:+.2f}%" for c_ in pct_cols}, **{N[c_]: "{:,.2f}" for c_ in ("Price", "P/E", "Fwd P/E", "P/B", "EPS") if c_ in cols}}
+            if "Div %" in cols:
+                fmt[N["Div %"]] = "{:.2f}%"
+            if "RSI" in cols:
+                fmt["RSI"] = "{:.0f}"
+            if "Volatility" in cols:
+                fmt[N["Volatility"]] = "{:.1f}%"
+            st.dataframe(show.style.map(T.color_style, subset=[N[c_] for c_ in pct_cols]).format(fmt, na_rep="—"), hide_index=True, height=540,
+                         column_config={"": st.column_config.ImageColumn("", width="small")})
     with vt[-1]:
         if "_spark" in df:
+            lg = data.logos(df["Symbol"].head(36).tolist())
             items = []
             for _, r in df.head(36).iterrows():
                 sp = r["_spark"] if isinstance(r["_spark"], np.ndarray) else None
-                items.append(T.tile(f'{r["Symbol"]} · {str(r["Name"])[:20]}', T.fmt_price(r["Price"]), None, r["Chg %"], sp))
+                head = f'<div style="margin-bottom:4px">{T.company(r["Symbol"], str(r["Name"])[:22], lg.get(r["Symbol"]), 26)}</div>'
+                items.append(T.tile("", T.fmt_price(r["Price"]), None, r["Chg %"], sp, head_html=head))
             ui.html(T.tiles(items))
-    a, b, c = st.columns([2, 1, 1])
+    a, b, c_ = st.columns([2, 1, 1])
     pick = a.selectbox(L("Selected stock", "السهم المختار"), df["Symbol"].tolist())
-    if b.button(L("Open stock", "افتح السهم"), icon=":material/candlestick_chart:", key="sc_open"):
+    if b.button(L("Open stock", "افتح السهم"), icon=":material/candlestick_chart:", key="sc_open", width="stretch"):
         ui.open_stock(pick)
-    c.download_button(L("Export CSV", "تصدير CSV"), df.drop(columns=["_spark"], errors="ignore").to_csv(index=False).encode(),
-                      "screener.csv", "text/csv", icon=":material/download:")
+    c_.download_button(L("Export CSV", "تصدير CSV"), df.drop(columns=["_spark", "Logo", "_sector", "_industry"], errors="ignore").to_csv(index=False).encode(),
+                       "screener.csv", "text/csv", icon=":material/download:", width="stretch")
     if res.get("err"):
         with st.expander(L("Technical details", "تفاصيل فنية")):
             st.code(res["err"])

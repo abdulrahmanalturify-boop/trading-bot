@@ -36,3 +36,19 @@ SECTOR_AR = {
 
 def sector_name(s):
     return L(s, SECTOR_AR.get(s, s))
+
+
+def industry_name(ind):
+    from taxonomy import INDUSTRY_AR
+    return L(ind, INDUSTRY_AR.get(ind, ind)) if ind else "—"
+
+
+def theme_name(tk, sk=None):
+    from taxonomy import THEMES
+    if tk not in THEMES:
+        return "—"
+    en, ar, _, subs = THEMES[tk]
+    if sk is None:
+        return L(en, ar)
+    sen, sar, _ = subs[sk]
+    return L(sen, sar)

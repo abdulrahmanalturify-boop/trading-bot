@@ -115,16 +115,28 @@ US_UNIVERSE = list(STOCKS)
 SECTORS = sorted({v[1] for v in STOCKS.values()})
 
 
+def _rec(sym):
+    if sym in STOCKS:
+        return STOCKS[sym][:3]
+    from taxonomy import EXTRA
+    return EXTRA.get(sym, (sym, "Other", "Other"))
+
+
 def sector_of(sym):
-    return STOCKS.get(sym, (sym, "Other", "Other", 0))[1]
+    return _rec(sym)[1]
 
 
 def industry_of(sym):
-    return STOCKS.get(sym, (sym, "Other", "Other", 0))[2]
+    return _rec(sym)[2]
 
 
 def name_of(sym):
-    return STOCKS.get(sym, (sym,))[0]
+    return _rec(sym)[0]
+
+
+def known(sym):
+    from taxonomy import EXTRA
+    return sym in STOCKS or sym in EXTRA
 
 
 def by_sector():
