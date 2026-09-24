@@ -1,6 +1,6 @@
 """
-p_academy.py - Academy (interactive 3-minute courses with quizzes) · Glossary
-Course cards are links (?course=<id>) so clicking the image or title opens the course.
+p_academy.py - Academy (interactive 3-minute courses with quizzes, learning dashboard) · Glossary
+Clicking anywhere on a course card opens it (invisible button over the card, no page reload, progress is kept).
 """
 import pandas as pd
 import streamlit as st
@@ -16,22 +16,50 @@ from i18n import L, is_ar
 ss = st.session_state
 LEVELS = {"all": ("All", "الكل"), "Beginner": ("Beginner", "مبتدئ"), "Essential": ("Essential", "أساسي"),
           "Intermediate": ("Intermediate", "متوسط"), "Advanced": ("Advanced", "متقدم")}
-LEVEL_KIND = {"Beginner": "up", "Essential": "gold", "Intermediate": "acc", "Advanced": "vio"}
+LEVEL_KIND = {"Beginner": "beg", "Essential": "ess", "Intermediate": "int", "Advanced": "adv"}
+LEVEL_COLOR = {"Beginner": "#22C55E", "Essential": "#EAB308", "Intermediate": "#F97316", "Advanced": "#EF4444"}
 
 
 def _course(cid):
     return next((c for c in A.COURSES if c["id"] == cid), None)
 
 
-def _card(c, done):
+def _status(cid):
+    if cid in ss.get("completed", set()):
+        return "done"
+    return "prog" if ss.get(f"step_{cid}", 0) > 0 else "new"
+
+
+def _card_html(c):
     lvl = c["level"]
-    lang = "ar" if is_ar() else "en"
-    status = T.badge(L("Completed", "مكتمل"), "up", "check_circle") if done else T.badge(L("Start", "ابدأ"), "neu", "play_circle")
+    st_ = _status(c["id"])
+    n = len(c["sections"]) + 1
+    step = n if st_ == "done" else ss.get(f"step_{c['id']}", 0)
+    status = {"done": T.badge(L("Completed", "مكتمل"), "up", "check_circle"),
+              "prog": T.badge(L("In progress", "قيد التعلم"), "gold", "timelapse"),
+              "new": T.badge(L("Start", "ابدأ"), "neu", "play_circle")}[st_]
     mins = T.badge(L(str(c["mins"]) + " min", str(c["mins"]) + " دقائق"), "neu", "schedule")
-    return (f'<a class="course" href="?course={c["id"]}&lang={lang}" target="_self"><div class="art">{A.course_art(c["art"], c["id"])}'
+    color = LEVEL_COLOR.get(lvl[0], T.ACCENT)
+    return (f'<div class="course" style="--lv:{color}"><div class="art">{A.course_art(c["art"], c["id"])}'
             f'<div class="play">{T.icon("play_arrow")}</div></div><div class="body"><div class="ttl">{T.esc(L(*c["title"]))}</div>'
             f'<div class="tag">{T.esc(L(*c["tagline"]))}</div><div class="meta">{T.badge(L(*lvl), LEVEL_KIND.get(lvl[0], "neu"), "signal_cellular_alt")}'
-            f'{mins}{status}</div></div></a>')
+            f'{mins}{status}</div><div class="prog"><span style="width:{step / n * 100:.0f}%"></span></div></div></div>')
+
+
+def _open_course(cid):
+    ss["course"] = cid
+    st.query_params["course"] = cid
+
+
+def course_cards(courses, prefix="crs", per_row=3):
+    """Clickable cards: the whole card is a button (no reload, progress kept)."""
+    for i in range(0, len(courses), per_row):
+        cols = st.columns(per_row)
+        for col, c in zip(cols, courses[i:i + per_row]):
+            with col:
+                with st.container(key=f"{prefix}_{c['id']}"):
+                    ui.html(_card_html(c))
+                    st.button(L(*c["title"]), key=f"{prefix}b_{c['id']}", on_click=_open_course, args=(c["id"],), width="stretch")
 
 
 # ---------------------------------------------------------------- interactive blocks
@@ -50,7 +78,7 @@ def interactive(key):
         d = ta.add_all(df)
         cfg = {"live_spy": (d.tail(126), [], []), "sr_live": (d.tail(252), ["Support / Resistance"], []),
                "ma_live": (d, ["SMA 50", "SMA 200"], []), "rsi_live": (d.tail(180), ["SMA 20"], ["RSI", "MACD"])}[key]
-        st.plotly_chart(charts.price_chart(cfg[0], "Candles", cfg[1], cfg[2], False, height=460 + 120 * len(cfg[2])), key=f"iac_{key}")
+        ui.chart(charts.price_chart(cfg[0], "Candles", cfg[1], cfg[2], False, height=460 + 120 * len(cfg[2])), key=f"iac_{key}")
         return
     if key == "position_calc":
         c = st.columns(4)
@@ -91,8 +119,8 @@ def interactive(key):
         prem = c[2].slider(L("Premium $", "البريميوم $"), 0.5, 15.0, 3.0, step=0.5, key="po_p")
         now = c[3].slider(L("Stock now $", "سعر السهم الآن $"), 50, 150, 100, key="po_n")
         be = strike + prem if kind == "call" else strike - prem
-        st.plotly_chart(charts.payoff(kind, float(strike), float(prem), float(now), L("Profit / loss at expiration (1 contract)", "الربح والخسارة عند الانتهاء (عقد واحد)"),
-                                      (L("Stock price at expiration", "سعر السهم عند الانتهاء"), L("Profit / loss ($)", "الربح / الخسارة ($)"))), key="po_chart")
+        ui.chart(charts.payoff(kind, float(strike), float(prem), float(now), L("Profit / loss at expiration (1 contract)", "الربح والخسارة عند الانتهاء (عقد واحد)"),
+                               (L("Stock price at expiration", "سعر السهم عند الانتهاء"), L("Profit / loss ($)", "الربح / الخسارة ($)"))), key="po_chart")
         m = st.columns(3)
         m[0].metric(L("Cost (max loss)", "التكلفة (أقصى خسارة)"), f"${prem * 100:,.0f}")
         m[1].metric(L("Breakeven", "نقطة التعادل"), f"${be:,.2f}")
@@ -115,12 +143,13 @@ def _course_view(c):
     n = len(c["sections"])
     step = ss.setdefault(f"step_{cid}", 0)
     if st.button(L("All courses", "كل الدورات"), icon=":material/arrow_back:"):
-        st.query_params.clear()
+        ss.pop("course", None)
+        st.query_params.pop("course", None)
         st.rerun()
     lvl = c["level"]
     mins = T.badge(L(str(c["mins"]) + " min", str(c["mins"]) + " دقائق"), "neu", "schedule")
     lessons = T.badge(L(f"{n} lessons + quiz", f"{n} دروس + اختبار"), "acc", "menu_book")
-    ui.html(f'<div class="course" style="pointer-events:none;margin-bottom:12px"><div class="art" style="height:170px">{A.course_art(c["art"], cid + "h")}</div>'
+    ui.html(f'<div class="course" style="pointer-events:none;margin-bottom:12px;--lv:{LEVEL_COLOR.get(lvl[0], T.ACCENT)}"><div class="art" style="height:170px">{A.course_art(c["art"], cid + "h")}</div>'
             f'<div class="body"><div class="ttl" style="font-size:1.5rem">{T.esc(L(*c["title"]))}</div><div class="tag">{T.esc(L(*c["tagline"]))}</div>'
             f'<div class="meta">{T.badge(L(*lvl), LEVEL_KIND.get(lvl[0], "neu"), "signal_cellular_alt")}{mins}'
             f'{lessons}</div></div></div>')
@@ -160,8 +189,7 @@ def _course_view(c):
         for i, ((q_en, q_ar, opts, ans, w_en, w_ar), got) in enumerate(zip(c["quiz"], answers)):
             ok = got == ans
             score += ok
-            ic, col = ("check_circle", T.UP) if ok else ("cancel", T.DOWN)
-            ui.html(f'<div class="check{rtl}">{T.icon(ic, col)}<div><b>{i + 1}. {T.esc(L(*opts[ans]))}</b> '
+            ui.html(f'<div class="check{rtl}">{T.ico("check", "pos") if ok else T.ico("close", "neg")}<div><b>{i + 1}. {T.esc(L(*opts[ans]))}</b> '
                     f'<span class="muted">· {T.esc(L(w_en, w_ar))}</span></div></div>')
         total = len(c["quiz"])
         if score >= total - 1:
@@ -172,27 +200,77 @@ def _course_view(c):
         idx = [x["id"] for x in A.COURSES].index(cid)
         if idx + 1 < len(A.COURSES):
             nxt = A.COURSES[idx + 1]
-            ui.html(f'<div style="margin-top:12px">{L("Next course", "الدورة التالية")}:</div>' + '<div class="courses" style="max-width:360px">'
-                    + _card(nxt, nxt["id"] in ss.get("completed", set())) + "</div>")
+            ui.html(f'<div style="margin:12px 0 6px">{L("Next course", "الدورة التالية")}:</div>')
+            course_cards([nxt], "nxt", 3)
+
+
+def dashboard():
+    """Learning dashboard: overall ring, progress per level (level colors), completed vs in progress, continue card."""
+    done = ss.get("completed", set())
+    prog = [c for c in A.COURSES if _status(c["id"]) == "prog"]
+    total = len(A.COURSES)
+    pct = len(done) / total * 100 if total else 0
+    order = ["Beginner", "Essential", "Intermediate", "Advanced"]
+    by = {lv: [c for c in A.COURSES if c["level"][0] == lv] for lv in order}
+    lv_names = {c["level"][0]: c["level"] for c in A.COURSES}
+    c1, c2, c3 = st.columns([0.95, 1.1, 1.35])
+    with c1:
+        ui.html(f'<div class="dcard"><div class="dt">{L("Your progress", "تقدمك")}</div>'
+                f'{T.ring(pct, 160, T.ACCENT, f"{pct:.0f}%", L(f"{len(done)} of {total} courses", f"{len(done)} من {total} دورات"))}'
+                f'<div style="display:flex;justify-content:center;gap:6px;margin-top:10px;flex-wrap:wrap">'
+                f'{T.badge(L(f"{len(done)} completed", f"{len(done)} مكتملة"), "up", "check_circle")}'
+                f'{T.badge(L(f"{len(prog)} in progress", f"{len(prog)} قيد التعلم"), "gold", "timelapse")}</div></div>')
+    with c2:
+        rows = []
+        for lv in order:
+            cs = by[lv]
+            if not cs:
+                continue
+            d_ = sum(1 for c in cs if c["id"] in done)
+            p_ = sum(1 for c in cs if _status(c["id"]) == "prog")
+            color = LEVEL_COLOR[lv]
+            w1, w2 = d_ / len(cs) * 100, p_ / len(cs) * 100
+            rows.append(f'<div class="lvl"><div class="t"><span>{T.badge(L(*lv_names[lv]), LEVEL_KIND[lv], "signal_cellular_alt")}</span>'
+                        f'<span class="num">{d_}/{len(cs)}</span></div><div class="trk" style="display:flex">'
+                        f'<span style="width:{w1:.0f}%;background:{color}"></span><span style="width:{w2:.0f}%;background:{color};opacity:.4"></span></div></div>')
+        ui.html(f'<div class="dcard"><div class="dt">{L("Levels", "المستويات")}</div>{"".join(rows)}'
+                f'<div class="muted" style="font-size:.72rem;margin-top:8px">{L("Solid = completed · light = in progress", "اللون الكامل = مكتمل · الفاتح = قيد التعلم")}</div></div>')
+    with c3:
+        lv_list = [lv for lv in order if by[lv]]
+        ui.chart(charts.level_progress([L(*lv_names[lv]) for lv in lv_list],
+                                       [sum(1 for c in by[lv] if c["id"] in done) for lv in lv_list],
+                                       [sum(1 for c in by[lv] if _status(c["id"]) == "prog") for lv in lv_list],
+                                       [len(by[lv]) for lv in lv_list], [LEVEL_COLOR[lv] for lv in lv_list],
+                                       L("Completed vs in progress", "المكتملة مقابل قيد التعلم"),
+                                       (L("Completed", "مكتملة"), L("In progress", "قيد التعلم"), L("Not started", "لم تبدأ"))), key="ac_levels")
+    nxt = prog[0] if prog else next((c for c in A.COURSES if c["id"] not in done), None)
+    if nxt:
+        a, b = st.columns([3, 1], vertical_alignment="center")
+        a.markdown(f'<div class="card" style="margin:0;display:flex;gap:12px;align-items:center">{T.ico("play_arrow", "acc")}'
+                   f'<div><div class="muted" style="font-size:.75rem">{L("Continue learning", "تابع التعلم") if prog else L("Start here", "ابدأ من هنا")}</div>'
+                   f'<b>{T.esc(L(*nxt["title"]))}</b></div></div>', unsafe_allow_html=True)
+        b.button(L("Open course", "افتح الدورة"), icon=":material/play_circle:", type="primary", key="ac_cont", on_click=_open_course,
+                 args=(nxt["id"],), width="stretch")
 
 
 def page_academy():
-    cid = st.query_params.get("course")
+    cid = ss.get("course") or st.query_params.get("course")
     c = _course(cid) if cid else None
     if c:
+        ss["course"] = c["id"]
         _course_view(c)
         ui.foot()
         return
     ui.header("school", "Academy", "الأكاديمية",
               "Short interactive courses: about 3 minutes each, with live charts and a quiz. Click any card to start.",
               "دورات قصيرة وتفاعلية: حوالي 3 دقائق لكل دورة، مع رسوم مباشرة واختبار. اضغط على أي بطاقة للبدء.")
-    done = ss.get("completed", set())
-    a, b = st.columns([2, 1])
-    lvl = a.segmented_control(L("Level", "المستوى"), list(LEVELS), default="all", key="ac_lvl",
-                              format_func=lambda k: L(*LEVELS[k])) or "all"
-    b.metric(L("Completed", "المكتملة"), f"{len(done)}/{len(A.COURSES)}")
+    ui.sec("dashboard", "Learning dashboard", "لوحة التعلم")
+    ui.safe(dashboard)
+    ui.sec("school", "Courses", "الدورات")
+    lvl = st.segmented_control(L("Level", "المستوى"), list(LEVELS), default="all", key="ac_lvl",
+                               format_func=lambda k: L(*LEVELS[k])) or "all"
     courses = [c for c in A.COURSES if lvl == "all" or c["level"][0] == lvl]
-    ui.html('<div class="courses">' + "".join(_card(c, c["id"] in done) for c in courses) + "</div>")
+    course_cards(courses)
     ui.foot()
 
 

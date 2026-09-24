@@ -102,59 +102,182 @@ def chart_tab(sym, daily):
     if len(d) < 2:
         st.warning(L("Not enough data for this range.", "لا توجد بيانات كافية لهذا المدى."))
         return
-    st.plotly_chart(charts.price_chart(d, ctype, overlays, panels, intraday))
+    ui.chart(charts.price_chart(d, ctype, overlays, panels, intraday), key="st_chart")
+
+
+def _counts(t):
+    return [(f'{sig("Sell")} {int((t["Signal"] == "Sell").sum())}', "neg"), (f'{sig("Neutral")} {int((t["Signal"] == "Neutral").sum())}', "neu"),
+            (f'{sig("Buy")} {int((t["Signal"] == "Buy").sum())}', "pos")]
 
 
 def technicals_tab(daily):
     d = ta.add_all(daily)
     table, total, label, parts = ta.technical_summary(d)
-    ticks = [sig(x) for x in ("Strong Sell", "Sell", "Neutral", "Buy", "Strong Buy")]
-    c1, c2, c3 = st.columns(3)
-    c1.plotly_chart(charts.gauge(total, f"{L('Summary', 'الملخص')}: {sig(label)}", ticks))
+    if table.empty:
+        st.info(L("Not enough data for technical analysis.", "لا توجد بيانات كافية للتحليل الفني."))
+        return
+    labels = [sig(x) for x in ("Strong Sell", "Sell", "Neutral", "Buy", "Strong Buy")]
+    is_ma = table["Indicator"].str.startswith(("EMA", "SMA"))
     osc, mas = parts.get("Oscillators", 0), parts.get("Moving Averages", 0)
-    c2.plotly_chart(charts.gauge(osc, f"{L('Oscillators', 'المذبذبات')}: {sig(ta.label_for(osc))}", ticks))
-    c3.plotly_chart(charts.gauge(mas, f"{L('Moving averages', 'المتوسطات')}: {sig(ta.label_for(mas))}", ticks))
-    left, right = st.columns([1.3, 1])
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(T.rating_meter(osc, sig(ta.label_for(osc)), L("Oscillators", "المذبذبات"), _counts(table[~is_ma]), labels), unsafe_allow_html=True)
+    c2.markdown(T.rating_meter(total, sig(label), L("Summary", "الملخص"), _counts(table), labels), unsafe_allow_html=True)
+    c3.markdown(T.rating_meter(mas, sig(ta.label_for(mas)), L("Moving averages", "المتوسطات المتحركة"), _counts(table[is_ma]), labels),
+                unsafe_allow_html=True)
+
+    # ---- performance strip
+    ui.sec("trending_up", "Performance", "الأداء")
+    c = daily["Close"]
+    cells = []
+    for lab, n in (("1D", 1), ("1W", 5), ("1M", 21), ("3M", 63), ("6M", 126), ("YTD", "ytd"), ("1Y", 252)):
+        if n == "ytd":
+            y = c[c.index.year == c.index[-1].year]
+            v = (c.iloc[-1] / y.iloc[0] - 1) * 100 if len(y) > 1 else np.nan
+        else:
+            v = (c.iloc[-1] / c.iloc[-1 - n] - 1) * 100 if len(c) > n else np.nan
+        if pd.notna(v):
+            cells.append(f'<div class="pc2 {T.cls(v)}"><div class="l">{lab}</div><div class="v">{v:+.2f}%</div></div>')
+    ui.html('<div class="perfrow">' + "".join(cells) + "</div>")
+
+    # ---- key readings
+    last = d.iloc[-1]
+    price = float(last["Close"])
+
+    def m(label_, value, kind="neu"):
+        return f'<div class="m {kind}"><div class="l">{label_}</div><div class="v">{value}</div></div>'
+    rsi = last.get("RSI", np.nan)
+    rsi_kind = "pos" if rsi < 30 else ("neg" if rsi > 70 else "neu")
+    rsi_note = L("oversold", "تشبع بيعي") if rsi < 30 else (L("overbought", "تشبع شرائي") if rsi > 70 else L("neutral", "محايد"))
+    adx = last.get("ADX", np.nan)
+    vol_x = last["Volume"] / last["VolAvg20"] if "VolAvg20" in d and last.get("VolAvg20") else np.nan
+    s50, s200 = last.get("SMA50", np.nan), last.get("SMA200", np.nan)
+    d50 = (price / s50 - 1) * 100 if pd.notna(s50) else np.nan
+    d200 = (price / s200 - 1) * 100 if pd.notna(s200) else np.nan
+    cards = [m("RSI (14)", f"{rsi:.1f} · {rsi_note}", rsi_kind),
+             m(L("Trend strength (ADX)", "قوة الاتجاه ADX"), f"{adx:.0f} · " + (L("strong", "قوي") if adx > 25 else L("weak", "ضعيف")), "neu") if pd.notna(adx) else "",
+             m(L("vs SMA 50", "مقابل متوسط 50"), f"{d50:+.2f}%", T.cls(d50)) if pd.notna(d50) else "",
+             m(L("vs SMA 200", "مقابل متوسط 200"), f"{d200:+.2f}%", T.cls(d200)) if pd.notna(d200) else "",
+             m("ATR (14)", f"{last['ATR']:.2f} · {last['ATR'] / price * 100:.1f}%") if pd.notna(last.get("ATR", np.nan)) else "",
+             m(L("Bollinger width", "عرض بولنجر"), f"{last['BB_width'] * 100:.1f}%") if pd.notna(last.get("BB_width", np.nan)) else "",
+             m(L("Volume vs 20-day avg", "الحجم مقابل متوسط 20"), f"{vol_x:.2f}×", "pos" if vol_x > 1.2 else "neu") if pd.notna(vol_x) else "",
+             m("MACD", f"{last['MACD']:.2f} / {last['MACD_signal']:.2f}", T.cls(last["MACD"] - last["MACD_signal"])) if pd.notna(last.get("MACD", np.nan)) else ""]
+    ui.html('<div class="mx">' + "".join(cards) + "</div>")
+
+    left, right = st.columns([1.35, 1])
     with left:
         ui.sec("tune", "Indicator signals", "إشارات المؤشرات")
-        t = table.copy()
-        t["Signal"] = t["Signal"].map(sig)
-        t = t.rename(columns={"Indicator": L("Indicator", "المؤشر"), "Value": L("Value", "القيمة"), "Signal": L("Signal", "الإشارة")})
-        buy, sell = sig("Buy"), sig("Sell")
-        st.dataframe(t.style.map(lambda v: f"color:{T.UP};font-weight:600" if v == buy else (f"color:{T.DOWN};font-weight:600" if v == sell else ""),
-                                 subset=[L("Signal", "الإشارة")]).format({L("Value", "القيمة"): "{:,.2f}"}), hide_index=True, height=560)
+        items = []
+        for _, r in table.iterrows():
+            k = {"Buy": "pos", "Sell": "neg"}.get(r["Signal"], "neu")
+            items.append(f'<div class="sg"><div><div class="n">{T.esc(r["Indicator"])}</div><div class="v">{r["Value"]:,.2f}</div></div>'
+                         f'<span class="pill {k}" style="min-width:64px">{T.esc(sig(r["Signal"]))}</span></div>')
+        ui.html('<div class="sigs">' + "".join(items) + "</div>")
     with right:
-        ui.sec("stacked_line_chart", "Pivot points", "نقاط الارتكاز")
+        ui.sec("stacked_line_chart", "Price ladder: pivots & support / resistance", "سلّم الأسعار: الارتكاز والدعوم والمقاومات")
         piv = ta.pivot_points(daily)
-        st.dataframe(pd.DataFrame({L("Level", "المستوى"): list(piv), L("Price", "السعر"): [round(v, 2) for v in piv.values()]}), hide_index=True)
-        ui.sec("horizontal_rule", "Support & resistance", "الدعوم والمقاومات")
-        price = daily["Close"].iloc[-1]
-        lv = ta.swing_levels(daily)
-        sr = pd.DataFrame({L("Level", "المستوى"): [round(x, 2) for x in lv],
-                           L("Type", "النوع"): [L("Support", "دعم") if x < price else L("Resistance", "مقاومة") for x in lv],
-                           L("Distance %", "المسافة %"): [(x / price - 1) * 100 for x in lv]})
-        st.dataframe(sr.iloc[::-1].style.map(T.color_style, subset=[L("Distance %", "المسافة %")]).format(
-            {L("Distance %", "المسافة %"): "{:+.2f}%"}), hide_index=True)
-        last = d.iloc[-1]
-        m1, m2 = st.columns(2)
-        m1.metric("ATR (14)", f"{last['ATR']:.2f}", f"{last['ATR'] / last['Close'] * 100:.2f}%", delta_color="off")
-        m2.metric(L("BB width", "عرض بولنجر"), f"{last['BB_width'] * 100:.1f}%")
-    st.plotly_chart(charts.returns_bars(daily, L("Performance", "الأداء")))
+        levels = [(k, v, "res" if k.startswith("R") else ("sup" if k.startswith("S") else "piv")) for k, v in piv.items()]
+        sw = ta.swing_levels(daily)
+        res_ = sorted([x for x in sw if x > price])[:3]
+        sup_ = sorted([x for x in sw if x < price], reverse=True)[:3]
+        levels += [(L(f"Res {i + 1}", f"مقاومة {i + 1}"), v, "res") for i, v in enumerate(res_)]
+        levels += [(L(f"Sup {i + 1}", f"دعم {i + 1}"), v, "sup") for i, v in enumerate(sup_)]
+        ui.html(T.ladder(levels, price, L("Price", "السعر")))
+        st.caption(L("R = resistance above the price, S = support below it, P = pivot. Distance is from the current price.",
+                     "R = مقاومة فوق السعر، S = دعم تحت السعر، P = نقطة الارتكاز. المسافة محسوبة من السعر الحالي."))
+
+
+# ---------------------------------------------------------------- financials
+FIN_METRICS = {
+    "rev": ("Revenue", "الإيرادات", "money"), "gp": ("Gross profit", "إجمالي الربح", "money"),
+    "op": ("Operating income", "الدخل التشغيلي", "money"), "ni": ("Net income", "صافي الدخل", "money"),
+    "ebitda": ("EBITDA", "EBITDA", "money"), "eps": ("EPS (diluted)", "ربحية السهم", "eps"),
+    "gm": ("Gross margin", "الهامش الإجمالي", "pct"), "om": ("Operating margin", "الهامش التشغيلي", "pct"),
+    "nm": ("Net margin", "صافي الهامش", "pct"), "roe": ("Return on equity", "العائد على حقوق الملكية", "pct"),
+    "roa": ("Return on assets", "العائد على الأصول", "pct"), "ocf": ("Operating cash flow", "التدفق النقدي التشغيلي", "money"),
+    "capex": ("Capital expenditure", "الإنفاق الرأسمالي", "money"), "fcf": ("Free cash flow", "التدفق النقدي الحر", "money"),
+    "div": ("Dividends paid", "التوزيعات المدفوعة", "money"), "buyback": ("Share buybacks", "إعادة شراء الأسهم", "money"),
+    "cash": ("Cash & equivalents", "النقد وما يعادله", "money"), "debt": ("Total debt", "إجمالي الديون", "money"),
+    "equity": ("Shareholders' equity", "حقوق المساهمين", "money"), "de": ("Debt / equity", "الديون / حقوق الملكية", "ratio"),
+    "cr": ("Current ratio", "نسبة التداول", "ratio"),
+}
+
+
+def _stmt_row(df, *names):
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    for n in names:
+        if n in df.index:
+            s = df.loc[n]
+            if isinstance(s, pd.DataFrame):
+                s = s.iloc[0]
+            s = pd.to_numeric(s, errors="coerce")
+            s.index = pd.to_datetime(s.index, errors="coerce")
+            s = s[s.index.notna()].sort_index()
+            return s if s.notna().any() else None
+    return None
+
+
+def fin_series(stm, freq="a"):
+    inc, bal, cf = stm.get(f"inc_{freq}"), stm.get(f"bal_{freq}"), stm.get(f"cf_{freq}")
+    r = lambda df, *n: _stmt_row(df, *n)
+    out = {"rev": r(inc, "Total Revenue", "Operating Revenue"), "gp": r(inc, "Gross Profit"),
+           "op": r(inc, "Operating Income", "EBIT"), "ni": r(inc, "Net Income", "Net Income Common Stockholders"),
+           "ebitda": r(inc, "EBITDA", "Normalized EBITDA"), "eps": r(inc, "Diluted EPS", "Basic EPS"),
+           "ocf": r(cf, "Operating Cash Flow", "Cash Flow From Continuing Operating Activities"),
+           "capex": r(cf, "Capital Expenditure"), "fcf": r(cf, "Free Cash Flow"),
+           "div": r(cf, "Cash Dividends Paid", "Common Stock Dividend Paid"),
+           "buyback": r(cf, "Repurchase Of Capital Stock", "Common Stock Payments"),
+           "cash": r(bal, "Cash And Cash Equivalents", "Cash Cash Equivalents And Short Term Investments"),
+           "debt": r(bal, "Total Debt"), "equity": r(bal, "Stockholders Equity", "Common Stock Equity", "Total Equity Gross Minority Interest")}
+    assets = r(bal, "Total Assets")
+    ca, cl = r(bal, "Current Assets"), r(bal, "Current Liabilities")
+    if out["fcf"] is None and out["ocf"] is not None and out["capex"] is not None:
+        out["fcf"] = out["ocf"] + out["capex"]
+    ann = 4 if freq == "q" else 1
+    rev, ni, eq = out["rev"], out["ni"], out["equity"]
+    if rev is not None:
+        for k, src in (("gm", "gp"), ("om", "op"), ("nm", "ni")):
+            if out[src] is not None:
+                out[k] = (out[src] / rev.replace(0, np.nan) * 100).dropna()
+    if ni is not None and eq is not None:
+        out["roe"] = (ni * ann / eq.replace(0, np.nan) * 100).dropna()
+    if ni is not None and assets is not None:
+        out["roa"] = (ni * ann / assets.replace(0, np.nan) * 100).dropna()
+    if out["debt"] is not None and eq is not None:
+        out["de"] = (out["debt"] / eq.replace(0, np.nan)).dropna()
+    if ca is not None and cl is not None:
+        out["cr"] = (ca / cl.replace(0, np.nan)).dropna()
+    return {k: v for k, v in out.items() if v is not None and v.notna().any()}
+
+
+def _period_labels(idx, freq):
+    return [f"FY{d.year}" if freq == "a" else f"Q{(d.month - 1) // 3 + 1} {d.year}" for d in idx]
+
+
+def _fmt_metric(v, kind):
+    if v is None or pd.isna(v):
+        return "—"
+    if kind == "money":
+        return ("-" if v < 0 else "") + "$" + T.fmt_big(abs(v))
+    if kind == "pct":
+        return f"{v:.1f}%"
+    if kind == "eps":
+        return f"${v:.2f}"
+    return f"{v:.2f}"
 
 
 def financials_tab(sym, inf):
-    f = data.fundamentals(sym)
-
     def pct(k):
         v = inf.get(k)
-        return f"{v * 100:.2f}%" if isinstance(v, (int, float)) else "—"
+        return (f"{v * 100:.2f}%", T.cls(v)) if isinstance(v, (int, float)) else ("—", "neu")
 
     def num(k, dec=2):
         v = inf.get(k)
-        return f"{v:,.{dec}f}" if isinstance(v, (int, float)) else "—"
+        return (f"{v:,.{dec}f}", "neu") if isinstance(v, (int, float)) else ("—", "neu")
+    big = lambda k: (T.fmt_big(inf.get(k)), "neu")
     groups = {
         ("Valuation", "التقييم", "price_check"): [
-            (L("Market cap", "القيمة السوقية"), T.fmt_big(inf.get("marketCap"))), (L("Enterprise value", "قيمة المنشأة"), T.fmt_big(inf.get("enterpriseValue"))),
+            (L("Market cap", "القيمة السوقية"), big("marketCap")), (L("Enterprise value", "قيمة المنشأة"), big("enterpriseValue")),
             ("P/E (TTM)", num("trailingPE")), (L("Forward P/E", "المكرر المستقبلي"), num("forwardPE")), ("PEG", num("trailingPegRatio")),
             ("P/S", num("priceToSalesTrailing12Months")), ("P/B", num("priceToBook")), ("EV/EBITDA", num("enterpriseToEbitda"))],
         ("Profitability", "الربحية", "savings"): [
@@ -163,23 +286,133 @@ def financials_tab(sym, inf):
         ("Growth", "النمو", "trending_up"): [
             (L("Revenue growth", "نمو الإيرادات"), pct("revenueGrowth")), (L("Earnings growth", "نمو الأرباح"), pct("earningsGrowth")),
             (L("Qtr earnings growth", "نمو الأرباح الفصلي"), pct("earningsQuarterlyGrowth")),
-            (L("Revenue (TTM)", "الإيرادات"), T.fmt_big(inf.get("totalRevenue"))), ("EBITDA", T.fmt_big(inf.get("ebitda")))],
+            (L("Revenue (TTM)", "الإيرادات"), big("totalRevenue")), ("EBITDA", big("ebitda"))],
         ("Balance sheet", "الميزانية", "account_balance_wallet"): [
-            (L("Total cash", "النقد"), T.fmt_big(inf.get("totalCash"))), (L("Total debt", "الديون"), T.fmt_big(inf.get("totalDebt"))),
+            (L("Total cash", "النقد"), big("totalCash")), (L("Total debt", "الديون"), big("totalDebt")),
             (L("Debt/Equity", "الديون/الملكية"), num("debtToEquity", 1)), (L("Current ratio", "نسبة التداول"), num("currentRatio")),
-            (L("Free cash flow", "التدفق النقدي الحر"), T.fmt_big(inf.get("freeCashflow")))],
+            (L("Free cash flow", "التدفق النقدي الحر"), (T.fmt_big(inf.get("freeCashflow")), T.cls(inf.get("freeCashflow"))))],
     }
     cols = st.columns(4)
     for col, ((gen, gar, ic), items) in zip(cols, groups.items()):
         with col:
             ui.sec(ic, gen, gar)
-            ui.html("".join(f'<div class="stat" style="margin-bottom:6px"><div class="l">{l}</div><div class="v">{v}</div></div>'
-                            for l, v in items))
-    inc = f["income_q"]
-    if isinstance(inc, pd.DataFrame) and not inc.empty:
-        st.plotly_chart(charts.income_chart(inc, L("Quarterly results ($B)", "النتائج الفصلية (مليار $)")))
+            ui.html('<div class="mx" style="grid-template-columns:1fr">' + "".join(
+                f'<div class="m {k}"><div class="l">{l}</div><div class="v">{v}</div></div>' for l, (v, k) in items) + "</div>")
+
+    with st.spinner(L("Loading financial statements...", "جاري تحميل القوائم المالية...")):
+        stm = data.statements(sym)
+    if all(v.empty for v in stm.values()):
+        st.info(L("Financial statements are not available for this symbol.", "القوائم المالية غير متاحة لهذا الرمز."))
+        return
+
+    # ---- interactive explorer: click a metric, see its history
+    ui.sec("insights", "Interactive metric explorer", "مستكشف المؤشرات التفاعلي")
+    a, b = st.columns([5, 1.2], vertical_alignment="bottom")
+    freq = b.segmented_control(L("Period", "الفترة"), ["a", "q"], default="a", key="fin_freq",
+                               format_func=lambda k: L("Annual", "سنوي") if k == "a" else L("Quarterly", "ربعي")) or "a"
+    series = fin_series(stm, freq)
+    avail = [k for k in FIN_METRICS if k in series]
+    if not avail:
+        st.caption(L("No statement data for this period.", "لا توجد بيانات لهذه الفترة."))
     else:
-        st.info(L("Quarterly statements are not available for this symbol.", "القوائم الفصلية غير متاحة لهذا الرمز."))
+        if ss.get("fin_metric") not in avail:
+            ss["fin_metric"] = "rev" if "rev" in avail else avail[0]
+        pick = a.pills(L("Choose a metric", "اختر المؤشر"), avail, key="fin_metric", selection_mode="single",
+                       format_func=lambda k: L(FIN_METRICS[k][0], FIN_METRICS[k][1])) or avail[0]
+        s_ = series[pick]
+        en, ar, kind = FIN_METRICS[pick]
+        labels_ = _period_labels(s_.index, freq)
+        vals = [float(v) if pd.notna(v) else np.nan for v in s_.values]
+        note = L(" (annualized)", " (سنوي)") if pick in ("roe", "roa") and freq == "q" else ""
+        ui.chart(charts.metric_bars(labels_, vals, L(en, ar) + note, kind), key="fin_chart")
+        last_v = vals[-1]
+        prev_v = vals[-2] if len(vals) > 1 else np.nan
+        yoy_v = vals[-5] if freq == "q" and len(vals) > 4 else (prev_v if freq == "a" else np.nan)
+
+        def chg(x, y):
+            if pd.isna(x) or pd.isna(y) or y == 0:
+                return None
+            return (x - y) if kind in ("pct", "ratio") else (x / abs(y) - 1) * 100 if y > 0 else (x - y) / abs(y) * 100
+        c_prev, c_yoy = chg(last_v, prev_v), chg(last_v, yoy_v)
+        unit = L(" pts", " نقطة") if kind in ("pct", "ratio") else "%"
+        k1, k2, k3 = st.columns(3)
+        k1.markdown(T.kpi("flag", L("Latest", "الأحدث") + f" · {labels_[-1]}", _fmt_metric(last_v, kind), "", T.cls(last_v) if kind != "ratio" else None),
+                    unsafe_allow_html=True)
+        k2.markdown(T.kpi("swap_vert", L("vs previous period", "مقابل الفترة السابقة"), f"{c_prev:+.1f}{unit}" if c_prev is not None else "—", "",
+                          T.cls(c_prev) if c_prev is not None else None), unsafe_allow_html=True)
+        k3.markdown(T.kpi("event_repeat", L("vs a year earlier", "مقابل قبل سنة"), f"{c_yoy:+.1f}{unit}" if c_yoy is not None else "—", "",
+                          T.cls(c_yoy) if c_yoy is not None else None), unsafe_allow_html=True)
+
+    # ---- cash flow
+    ui.sec("payments", "Cash flow", "التدفقات النقدية")
+    ca = fin_series(stm, "a")
+    ocf, capex, fcf = ca.get("ocf"), ca.get("capex"), ca.get("fcf")
+    if ocf is None and fcf is None:
+        st.caption(L("Cash flow statement is not available for this symbol.", "قائمة التدفقات النقدية غير متاحة لهذا الرمز."))
+    else:
+        base = (fcf if fcf is not None else ocf).dropna()
+        idx = base.index
+        get = lambda s, d: float(s.get(d, np.nan)) if s is not None else np.nan
+        last_d = idx[-1]
+        rev = ca.get("rev")
+        f_last, o_last = get(fcf, last_d), get(ocf, last_d)
+        cap = inf.get("marketCap")
+        ni_last = get(ca.get("ni"), last_d)
+        k = st.columns(5)
+        k[0].markdown(T.kpi("account_balance", L("Operating cash flow", "التدفق التشغيلي"), _fmt_metric(o_last, "money"), f"FY{last_d.year}", T.cls(o_last)),
+                      unsafe_allow_html=True)
+        k[1].markdown(T.kpi("savings", L("Free cash flow", "التدفق النقدي الحر"), _fmt_metric(f_last, "money"), f"FY{last_d.year}", T.cls(f_last)),
+                      unsafe_allow_html=True)
+        fm = f_last / get(rev, last_d) * 100 if rev is not None and get(rev, last_d) else np.nan
+        k[2].markdown(T.kpi("percent", L("FCF margin", "هامش التدفق الحر"), f"{fm:.1f}%" if pd.notna(fm) else "—", L("of revenue", "من الإيرادات"),
+                            T.cls(fm) if pd.notna(fm) else None), unsafe_allow_html=True)
+        fy = f_last / cap * 100 if cap and pd.notna(f_last) else np.nan
+        k[3].markdown(T.kpi("sell", L("FCF yield", "عائد التدفق الحر"), f"{fy:.2f}%" if pd.notna(fy) else "—", L("FCF / market cap", "التدفق / القيمة السوقية"),
+                            T.cls(fy) if pd.notna(fy) else None), unsafe_allow_html=True)
+        cc = o_last / ni_last if pd.notna(ni_last) and ni_last > 0 and pd.notna(o_last) else np.nan
+        k[4].markdown(T.kpi("sync_alt", L("Cash conversion", "جودة الأرباح النقدية"), f"{cc:.2f}×" if pd.notna(cc) else "—",
+                            L("operating cash / net income", "النقد التشغيلي / صافي الدخل"), ("pos" if cc >= 1 else "neg") if pd.notna(cc) else None),
+                      unsafe_allow_html=True)
+        left, right = st.columns([1.25, 1])
+        with left:
+            per = _period_labels(idx, "a")
+            margin = [get(fcf, d) / get(rev, d) * 100 if rev is not None and get(rev, d) else None for d in idx] if fcf is not None else None
+            ui.chart(charts.cash_trend(per, [get(ocf, d) for d in idx], [get(capex, d) for d in idx], [get(fcf, d) for d in idx], margin,
+                                       L("Cash flow trend", "اتجاه التدفقات النقدية"),
+                                       (L("Operating cash flow", "التدفق التشغيلي"), L("Capital expenditure", "الإنفاق الرأسمالي"),
+                                        L("Free cash flow", "التدفق النقدي الحر"), L("FCF margin", "هامش التدفق الحر"))), key="cf_trend")
+        with right:
+            items = []
+            if pd.notna(o_last):
+                items.append((L("Operating CF", "التشغيلي"), o_last, "relative"))
+            cx = get(capex, last_d)
+            if pd.notna(cx):
+                items.append((L("CapEx", "الإنفاق الرأسمالي"), cx, "relative"))
+            items.append((L("Free CF", "التدفق الحر"), 0, "total"))
+            for key_, en_, ar_ in (("div", "Dividends", "التوزيعات"), ("buyback", "Buybacks", "إعادة الشراء")):
+                v = get(ca.get(key_), last_d)
+                if pd.notna(v) and v != 0:
+                    items.append((L(en_, ar_), v, "relative"))
+            items.append((L("Left over", "المتبقي"), 0, "total"))
+            if len(items) > 2:
+                ui.chart(charts.cash_waterfall(items, L(f"Where the cash went · FY{last_d.year}", f"أين ذهب النقد · {last_d.year}")), key="cf_wf")
+    with st.expander(L("Full financial statements", "القوائم المالية الكاملة"), icon=":material/table_view:"):
+        f2 = st.segmented_control(L("Period ", "الفترة "), ["a", "q"], default="a", key="fin_freq2",
+                                  format_func=lambda k: L("Annual", "سنوي") if k == "a" else L("Quarterly", "ربعي")) or "a"
+        tabs = st.tabs([L("Income statement", "قائمة الدخل"), L("Balance sheet", "الميزانية العمومية"), L("Cash flow", "التدفقات النقدية")])
+        for tab, key_ in zip(tabs, ("inc", "bal", "cf")):
+            with tab:
+                df = stm.get(f"{key_}_{f2}")
+                if not isinstance(df, pd.DataFrame) or df.empty:
+                    st.caption("—")
+                    continue
+                num = df.apply(pd.to_numeric, errors="coerce")
+                show = num / 1e9
+                raw = [i for i in num.index if any(w in str(i) for w in ("EPS", "Per Share", "Rate"))]
+                show.loc[raw] = num.loc[raw]
+                show.columns = _period_labels(pd.to_datetime(show.columns, errors="coerce"), f2)
+                st.dataframe(show.style.format("{:,.2f}", na_rep="—"), height=420)
+                st.caption(L("Values in billions of USD (EPS and rates as reported).", "القيم بالمليار دولار (ربحية السهم والنسب كما هي)."))
 
 
 def analysts_tab(sym, inf, price):
@@ -187,20 +420,21 @@ def analysts_tab(sym, inf, price):
     c1, c2 = st.columns(2)
     with c1:
         if f["targets"]:
-            st.plotly_chart(charts.target_chart(price, f["targets"], L("12-month price targets", "السعر المستهدف (12 شهر)")))
+            ui.chart(charts.target_chart(price, f["targets"], L("12-month price targets", "السعر المستهدف (12 شهر)")), key="an_tgt")
             mean = f["targets"].get("mean")
             if mean:
-                st.metric(L("Upside to mean target", "مساحة الصعود للهدف"), f"{(mean / price - 1) * 100:+.1f}%",
-                          f"{inf.get('numberOfAnalystOpinions', 0)} {L('analysts', 'محلل')}", delta_color="off")
+                up = (mean / price - 1) * 100
+                ui.html(T.kpi("flag", L("Upside to mean target", "مساحة الصعود للهدف"), f"{up:+.1f}%",
+                              f"{inf.get('numberOfAnalystOpinions', 0) or 0} {L('analysts', 'محلل')}", T.cls(up)))
         rec = f["rec_summary"]
         if isinstance(rec, pd.DataFrame) and not rec.empty:
-            st.plotly_chart(charts.rec_chart(rec, L("Analyst recommendations", "توصيات المحللين")))
+            ui.chart(charts.rec_chart(rec, L("Analyst recommendations", "توصيات المحللين")), key="an_rec")
     with c2:
         eh = f["earnings_hist"]
         if isinstance(eh, pd.DataFrame) and not eh.empty:
             fig = charts.eps_chart(eh, L("EPS: estimate vs actual", "ربحية السهم: المتوقع مقابل الفعلي"))
             if fig is not None:
-                st.plotly_chart(fig)
+                ui.chart(fig, key="an_eps")
         if f["earnings_date"] is not None:
             days = (pd.Timestamp(f["earnings_date"]).normalize() - pd.Timestamp.now().normalize()).days
             st.metric(L("Next earnings", "إعلان الأرباح القادم"), f"{pd.Timestamp(f['earnings_date']):%Y-%m-%d}",
@@ -265,9 +499,9 @@ def _max_pain(calls, puts):
     strikes = sorted(set(calls.get("strike", pd.Series(dtype=float))) | set(puts.get("strike", pd.Series(dtype=float))))
     if not strikes:
         return None
-    co, po = calls.fillna(0), puts.fillna(0)
-    pain = [(k * 0 + (co["openInterest"] * np.maximum(k - co["strike"], 0)).sum() + (po["openInterest"] * np.maximum(po["strike"] - k, 0)).sum(), k)
-            for k in strikes]
+    num = lambda df, c: pd.to_numeric(df[c], errors="coerce").fillna(0).to_numpy() if c in df else np.zeros(len(df))
+    ck, coi, pk, poi = num(calls, "strike"), num(calls, "openInterest"), num(puts, "strike"), num(puts, "openInterest")
+    pain = [(float((coi * np.maximum(k - ck, 0)).sum() + (poi * np.maximum(pk - k, 0)).sum()), k) for k in strikes]
     return min(pain)[1]
 
 
@@ -378,10 +612,10 @@ def options_tab(sym, price):
              "volume": "{:,.0f}", "openInterest": "{:,.0f}"}, na_rep="—"), hide_index=True, height=520)
     a, b = st.columns(2)
     win = lambda d: d[(d["strike"] > price * 0.7) & (d["strike"] < price * 1.3)]
-    a.plotly_chart(charts.oi_by_strike(win(calls), win(puts), price, L("Open interest by strike", "العقود المفتوحة حسب سعر التنفيذ"),
-                                       (L("Calls", "شراء"), L("Puts", "بيع"))))
-    b.plotly_chart(charts.iv_smile(win(calls), win(puts), price, L("Implied volatility smile", "منحنى التذبذب الضمني"),
-                                   (L("Calls IV", "تذبذب الشراء"), L("Puts IV", "تذبذب البيع"))))
+    ui.chart(charts.oi_by_strike(win(calls), win(puts), price, L("Open interest by strike", "العقود المفتوحة حسب سعر التنفيذ"),
+                                 (L("Calls", "شراء"), L("Puts", "بيع"))), key=f"oi_{sym}", container=a)
+    ui.chart(charts.iv_smile(win(calls), win(puts), price, L("Implied volatility smile", "منحنى التذبذب الضمني"),
+                             (L("Calls IV", "تذبذب الشراء"), L("Puts IV", "تذبذب البيع"))), key=f"iv_{sym}", container=b)
     ui.sec("local_fire_department", "Most active contracts", "العقود الأكثر تداولاً")
     act = pd.concat([calls.assign(Type="CALL"), puts.assign(Type="PUT")])
     act = act.sort_values("volume", ascending=False).head(10)[["Type", "contractSymbol", "strike", "lastPrice", "percentChange", "volume", "openInterest", "impliedVolatility"]]
@@ -671,7 +905,7 @@ def page_screener():
          "Price": L("Price", "السعر"), "Chg %": L("Change", "التغير"), "Volume": L("Volume", "الحجم"), "P/E": "P/E", "Fwd P/E": "Fwd P/E",
          "P/B": "P/B", "EPS": "EPS", "Div %": L("Dividend", "التوزيعات"), "52W %": L("52W perf", "أداء سنوي"), "Rating": L("Analyst rating", "تقييم المحللين"),
          "Perf W": L("Perf week", "أسبوع"), "Perf M": L("Perf month", "شهر"), "Perf 3M": L("Perf quarter", "3 أشهر"), "Perf YTD": L("Perf YTD", "منذ بداية العام"),
-         "RSI": "RSI", "Volatility": L("Volatility", "التذبذب"), "Logo": ""}
+         "RSI": "RSI", "Volatility": L("Volatility", "التذبذب"), "Logo": "Logo"}
     views = {L("Overview", "نظرة عامة"): ["Logo", "Symbol", "Name", "Sector", "Industry", "Mkt Cap", "P/E", "Price", "Chg %", "Volume"],
              L("Classification", "التصنيف"): ["Logo", "Symbol", "Name", "Sector", "Industry", "Theme", "Sub-theme"],
              L("Valuation", "التقييم"): ["Logo", "Symbol", "Mkt Cap", "P/E", "Fwd P/E", "P/B", "EPS", "Div %", "Rating"],
@@ -694,20 +928,19 @@ def page_screener():
             if "Volatility" in cols:
                 fmt[N["Volatility"]] = "{:.1f}%"
             st.dataframe(show.style.map(T.color_style, subset=[N[c_] for c_ in pct_cols]).format(fmt, na_rep="—"), hide_index=True, height=540,
-                         column_config={"": st.column_config.ImageColumn("", width="small")})
+                         column_config={"Logo": st.column_config.ImageColumn(" ", width="small")})
     with vt[-1]:
         if "_spark" in df:
             lg = data.logos(df["Symbol"].head(36).tolist())
             items = []
             for _, r in df.head(36).iterrows():
                 sp = r["_spark"] if isinstance(r["_spark"], np.ndarray) else None
-                head = f'<div style="margin-bottom:4px">{T.company(r["Symbol"], str(r["Name"])[:22], lg.get(r["Symbol"]), 26)}</div>'
+                head = f'<div style="margin-bottom:4px">{T.company(r["Symbol"], str(r["Name"])[:22], lg.get(r["Symbol"]), 26, href=ui.href(r["Symbol"]))}</div>'
                 items.append(T.tile("", T.fmt_price(r["Price"]), None, r["Chg %"], sp, head_html=head))
             ui.html(T.tiles(items))
-    a, b, c_ = st.columns([2, 1, 1])
-    pick = a.selectbox(L("Selected stock", "السهم المختار"), df["Symbol"].tolist())
-    if b.button(L("Open stock", "افتح السهم"), icon=":material/candlestick_chart:", key="sc_open", width="stretch"):
-        ui.open_stock(pick)
+    a, c_ = st.columns([3, 1], vertical_alignment="bottom")
+    with a:
+        ui.open_picker(df["Symbol"].tolist(), "sc", "Selected stock", "السهم المختار")
     c_.download_button(L("Export CSV", "تصدير CSV"), df.drop(columns=["_spark", "Logo", "_sector", "_industry"], errors="ignore").to_csv(index=False).encode(),
                        "screener.csv", "text/csv", icon=":material/download:", width="stretch")
     if res.get("err"):
@@ -783,11 +1016,11 @@ def page_scanner():
         ss.symbol = pick
         ui.goto("catalyst")
     v1, v2 = st.columns([1.6, 1])
-    v1.plotly_chart(charts.scan_scatter(res, L("Momentum map: 1-month return vs RSI (bubble = volume, color = score)",
-                                              "خريطة الزخم: عائد الشهر مقابل RSI (الحجم = حجم التداول، اللون = النقاط)")))
+    ui.chart(charts.scan_scatter(res, L("Momentum map: 1-month return vs RSI (bubble = volume, color = score)",
+                                        "خريطة الزخم: عائد الشهر مقابل RSI (الحجم = حجم التداول، اللون = النقاط)")), key="scan_sc", container=v1)
     by_sec = res.groupby("Sector")["Score"].mean().sort_values()
-    v2.plotly_chart(charts.hbar([sector_name(s) for s in by_sec.index], list(by_sec.values),
-                                L("Average score by sector", "متوسط النقاط حسب القطاع"), 460, suffix=""))
+    ui.chart(charts.hbar([sector_name(s) for s in by_sec.index], list(by_sec.values),
+                         L("Average score by sector", "متوسط النقاط حسب القطاع"), 460, suffix=""), key="scan_sec", container=v2)
     st.download_button(L("Export CSV", "تصدير CSV"), res.drop(columns=["_tags"]).to_csv(index=False).encode(), "scan.csv",
                        "text/csv", icon=":material/download:")
     ui.foot()
@@ -831,7 +1064,7 @@ def page_catalyst():
             + T.badge(f'{L("Bias", "التوجه")}: {L(p["bias"], p["bias_ar"])}', bias_kind, "explore")
             + T.badge(f'{L("Setup", "الفرصة")}: {L(p["setup"], p["setup_ar"])}', "acc", "target"))
     g1, g2, g3, g4 = st.columns([1.3, 1, 1, 1])
-    g1.plotly_chart(charts.score_gauge(score["total"], L("Catalyst score", "تقييم المحفزات")))
+    ui.chart(charts.score_gauge(score["total"], L("Catalyst score", "تقييم المحفزات")), key="cat_gauge", container=g1)
     scf = lambda v: "n/a" if v is None else f"{v:.0f}/100"
     g2.metric(L("Technical (50%)", "فني (50%)"), scf(score["technical"]), f"{sum(x['Pass'] for x in tech)}/{len(tech)}", delta_color="off")
     g3.metric(L("Fundamental (30%)", "مالي (30%)"), scf(score["fundamental"]),
@@ -839,22 +1072,22 @@ def page_catalyst():
     g4.metric(L("Events (20%)", "أحداث (20%)"), scf(score["event"]), f"{len(events)}", delta_color="off")
 
     ui.sec("flag", "Trade plan", "خطة التداول")
-    cards = [(L("Current price", "السعر الحالي"), f"${p['price']:,.2f}", T.BORDER),
-             (L("Entry zone", "منطقة الدخول"), f"${p['zone'][0]:,.2f} – ${p['zone'][1]:,.2f}", T.ACCENT),
-             (L("Stop loss", "وقف الخسارة"), f"${p['stop']:,.2f}", T.DOWN), (L("Target 1 (2R)", "الهدف الأول"), f"${p['t1']:,.2f}", T.UP),
-             (L("Target 2 (3R)", "الهدف الثاني"), f"${p['t2']:,.2f}", T.UP), (L("Risk / share", "المخاطرة للسهم"), f"${p['risk_per_share']:,.2f}", T.BORDER),
-             (L("Position size", "حجم الصفقة"), f"{p['shares']:,} {L('sh', 'سهم')}", T.GOLD),
-             (L("Position value", "قيمة الصفقة"), f"${p['position_value']:,.0f}", T.GOLD),
-             (L("Max loss", "أقصى خسارة"), f"${p['shares'] * p['risk_per_share']:,.0f}", T.DOWN),
-             ("ATR (14)", f"${p['atr']:,.2f} ({p['atr_pct']:.1f}%)", T.BORDER), (L("Support", "الدعم"), f"${p['support']:,.2f}", T.BORDER),
-             (L("Resistance", "المقاومة"), f"${p['resistance']:,.2f}", T.BORDER)]
-    ui.html('<div class="plan">' + "".join(f'<div class="p" style="border-inline-start-color:{c}"><div class="l">{l}</div><div class="v">{v}</div></div>'
-                                           for l, v, c in cards) + "</div>")
+    cards = [(L("Current price", "السعر الحالي"), f"${p['price']:,.2f}", ""),
+             (L("Entry zone", "منطقة الدخول"), f"${p['zone'][0]:,.2f} – ${p['zone'][1]:,.2f}", "acc"),
+             (L("Stop loss", "وقف الخسارة"), f"${p['stop']:,.2f}", "neg"), (L("Target 1 (2R)", "الهدف الأول"), f"${p['t1']:,.2f}", "pos"),
+             (L("Target 2 (3R)", "الهدف الثاني"), f"${p['t2']:,.2f}", "pos"), (L("Risk / share", "المخاطرة للسهم"), f"${p['risk_per_share']:,.2f}", ""),
+             (L("Position size", "حجم الصفقة"), f"{p['shares']:,} {L('sh', 'سهم')}", "acc"),
+             (L("Position value", "قيمة الصفقة"), f"${p['position_value']:,.0f}", ""),
+             (L("Max loss", "أقصى خسارة"), f"${p['shares'] * p['risk_per_share']:,.0f}", "neg"),
+             ("ATR (14)", f"${p['atr']:,.2f} ({p['atr_pct']:.1f}%)", ""), (L("Support", "الدعم"), f"${p['support']:,.2f}", ""),
+             (L("Resistance", "المقاومة"), f"${p['resistance']:,.2f}", "")]
+    ui.html('<div class="plan">' + "".join(f'<div class="p {k}"><div class="l">{l}</div><div class="v">{v}</div></div>'
+                                           for l, v, k in cards) + "</div>")
     left, right = st.columns([1.6, 1])
     with left:
         levels = [(L("Entry", "دخول"), p["entry"], T.ACCENT, "solid"), (L("Stop", "وقف"), p["stop"], T.DOWN, "dash"),
                   ("T1", p["t1"], T.UP, "dot"), ("T2", p["t2"], T.UP, "dash")]
-        st.plotly_chart(charts.price_chart(d.tail(126), "Candles", ["SMA 20", "SMA 50"], [], False, levels=levels, height=520))
+        ui.chart(charts.price_chart(d.tail(126), "Candles", ["SMA 20", "SMA 50"], [], False, levels=levels, height=520), key="cat_chart")
     with right:
         ui.sec("schedule", "Entry timing", "توقيت الدخول")
         earn = f["earnings_date"]
@@ -866,14 +1099,14 @@ def page_catalyst():
                   (L("<b>Holding period:</b> ", "<b>مدة الاحتفاظ:</b> ") + (L("2–6 weeks (swing)", "2–6 أسابيع (سوينغ)") if p["setup"] in ("Breakout", "Pullback to SMA20")
                                                                           else L("1–2 weeks (short swing)", "1–2 أسبوع")), "hourglass")]
         if ed is not None and 0 <= ed <= 14:
-            timing.append((f"<b class='down'>{L(f'Earnings in {ed} days', f'إعلان أرباح بعد {ed} يوم')}</b>: "
+            timing.append((f"<b class='dnt'>{L(f'Earnings in {ed} days', f'إعلان أرباح بعد {ed} يوم')}</b>: "
                            f"{L('half size, or wait until after the report.', 'نصف الحجم أو انتظر بعد الإعلان.')}", "warning"))
-        ui.html("".join(f'<div class="check">{T.icon(ic, T.GOLD)}<div>{t}</div></div>' for t, ic in timing))
+        ui.html("".join(f'<div class="check">{T.ico(ic, "gold")}<div>{t}</div></div>' for t, ic in timing))
         ui.sec("logout", "Exit rules", "قواعد الخروج")
-        ui.html("".join(f'<div class="check">{T.icon("chevron_right", T.MUTED)}<div>{T.esc(L(e, a))}</div></div>' for e, a in p["exits"]))
+        ui.html("".join(f'<div class="check">{T.ico("logout", "acc")}<div>{T.esc(L(e, a))}</div></div>' for e, a in p["exits"]))
 
     def checklist(items):
-        return "".join(f'<div class="check">{T.icon("check_circle", T.UP) if c["Pass"] else T.icon("cancel", T.DOWN)}'
+        return "".join(f'<div class="check">{T.ico("check", "pos") if c["Pass"] else T.ico("close", "neg")}'
                        f'<div><b>{T.esc(L(c["Check"], c["Check_ar"]))}</b> <span class="muted">· {T.esc(c["Detail"])}</span></div></div>'
                        for c in items)
     c1, c2 = st.columns(2)

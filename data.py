@@ -5,9 +5,11 @@ so a temporary error doesn't stick for hours.
 """
 import io
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
+import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
@@ -451,30 +453,58 @@ def translate_long(text, target="ar"):
     return " ".join(translate(parts, target))
 
 
-# ---------------------------------------------------------------- company logos (fetched server-side, cached)
+# ---------------------------------------------------------------- company logos
+# The server checks once (cached 7 days) which logo URL works, then pages use that URL directly:
+# no broken-image icons and much lighter pages than embedding the images.
+_LOGO_MEM = {}
+_LOGO_CB = {"fails": 0, "until": 0.0}
+
+
+def _is_img(b):
+    return len(b) > 200 and (b[:4] == b"\x89PNG" or b[:3] == b"\xff\xd8\xff" or b[:4] == b"RIFF")
+
+
 @st.cache_data(ttl=7 * 86400, show_spinner=False)
-def _logo(sym):
-    import base64
+def _logo_src(sym):
+    net_err = 0
     for url in (f"https://assets.parqet.com/logos/symbol/{sym}?format=png&size=100",
                 f"https://financialmodelingprep.com/image-stock/{sym}.png"):
         try:
-            r = requests.get(url, timeout=6, headers={"User-Agent": "Mozilla/5.0"})
-            b = r.content
-            if r.status_code == 200 and len(b) > 200 and (b[:4] == b"\x89PNG" or b[:3] == b"\xff\xd8\xff" or b[:4] == b"RIFF"):
-                mime = "png" if b[:4] == b"\x89PNG" else ("jpeg" if b[:3] == b"\xff\xd8\xff" else "webp")
-                return f"data:image/{mime};base64," + base64.b64encode(b).decode()
+            r = requests.get(url, timeout=4, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200 and _is_img(r.content):
+                return url
         except Exception:
-            continue
-    return None
+            net_err += 1
+    if net_err == 2:
+        raise Empty(sym)      # network trouble: try again later (not cached)
+    return None               # this company has no logo: remember that
+
+
+def _one_logo(s):
+    try:
+        u = _logo_src(s)
+    except Exception:                      # host unreachable: retry later, open the breaker after repeated failures
+        _LOGO_CB["fails"] += 1
+        if _LOGO_CB["fails"] >= 6:
+            _LOGO_CB["until"] = time.time() + 600
+            _LOGO_CB["fails"] = 0
+        return None
+    _LOGO_CB["fails"] = 0
+    _LOGO_MEM[s] = u                       # a URL, or None when the company has no logo
+    return u
 
 
 def logos(symbols):
-    """symbol -> data URI (or None). Indices/FX/crypto get no logo."""
+    """symbol -> verified logo URL (or None). Indices, FX, futures and crypto get no logo."""
     syms = [s for s in dict.fromkeys(symbols) if s and not any(c in s for c in "^=") and not s.endswith("-USD")]
-    out = {}
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        for s, uri in zip(syms, ex.map(_logo, syms)):
-            out[s] = uri
+    if time.time() < _LOGO_CB["until"]:           # logo hosts unreachable: use what we already know
+        return {s: _LOGO_MEM.get(s) for s in syms}
+    out = {s: _LOGO_MEM[s] for s in syms if s in _LOGO_MEM}
+    todo = [s for s in syms if s not in out]
+    if todo:
+        with ThreadPoolExecutor(max_workers=12) as ex:
+            for s, u in zip(todo, ex.map(_one_logo, todo)):
+                out[s] = u
     return out
 
 
@@ -549,18 +579,22 @@ def profile(symbol):
 @st.cache_data(ttl=7 * 86400, show_spinner=False)
 def _classify(symbol):
     i = dict(yf.Ticker(symbol).info or {})
-    if not i.get("sector"):
-        raise Empty(symbol)
-    return i.get("sector"), i.get("industry")
+    if len(i) < 3:
+        raise Empty(symbol)                       # nothing came back: don't cache
+    return i.get("sector"), i.get("industry")     # may be (None, None) for funds: cached
 
 
 def classify(symbols, limit=40):
-    """sector/industry for tickers outside the static universe (cached 7 days)."""
-    out = {}
-    todo = [s for s in symbols if not U.known(s)][:limit]
+    """sector/industry for any ticker (static lists first, Yahoo for the rest, cached 7 days)."""
+    from sp500 import SP500
+    out, todo = {}, []
     for s in symbols:
         if U.known(s):
             out[s] = (U.sector_of(s), U.industry_of(s))
+        elif s in SP500:
+            out[s] = (SP500[s][1], SP500[s][2])
+        else:
+            todo.append(s)
 
     def one(s):
         try:
@@ -568,7 +602,7 @@ def classify(symbols, limit=40):
         except Exception:
             return s, (None, None)
     with ThreadPoolExecutor(max_workers=6) as ex:
-        for s, v in ex.map(one, todo):
+        for s, v in ex.map(one, todo[:limit]):
             out[s] = v
     return out
 
@@ -778,3 +812,186 @@ def econ_releases(days_back=45):
         df[tcol] = pd.to_datetime(df[tcol], errors="coerce", utc=True)
         df = df.sort_values(tcol, ascending=False)
     return df.drop_duplicates(subset=[ev]).rename(columns={ev: "Event"})
+
+
+# ---------------------------------------------------------------- batch quotes (one request per 150 symbols)
+QUOTE_URL = "https://query1.finance.yahoo.com/v7/finance/quote?"
+
+
+@st.cache_data(ttl=90, show_spinner=False)
+def _quotes(symbols):
+    from yfinance.data import YfData
+    yd = YfData()
+    out = []
+    for i in range(0, len(symbols), 150):
+        js = yd.get_raw_json(QUOTE_URL, params={"symbols": ",".join(symbols[i:i + 150]), "formatted": "false",
+                                                "lang": "en-US", "region": "US"})
+        out += ((js or {}).get("quoteResponse") or {}).get("result") or []
+    if not out:
+        raise Empty("quotes")
+    return out
+
+
+def _ratio(a, b):
+    try:
+        return (float(a) / float(b) - 1) * 100 if a and b else np.nan
+    except (TypeError, ValueError):
+        return np.nan
+
+
+def quotes_df(symbols):
+    """Live snapshot for many symbols at once."""
+    try:
+        raw = _quotes(tuple(dict.fromkeys(symbols)))
+    except Exception:
+        return pd.DataFrame()
+    rows = []
+    for q in raw:
+        p = q.get("regularMarketPrice")
+        rows.append({"Symbol": q.get("symbol"), "Name": q.get("shortName") or q.get("longName") or q.get("symbol"),
+                     "Price": p, "Chg %": q.get("regularMarketChangePercent"), "Mkt Cap": q.get("marketCap"),
+                     "Volume": q.get("regularMarketVolume"), "Avg Vol": q.get("averageDailyVolume3Month"),
+                     "52W %": q.get("fiftyTwoWeekChangePercent"), "vs50 %": _ratio(p, q.get("fiftyDayAverage")),
+                     "vs200 %": _ratio(p, q.get("twoHundredDayAverage")), "Hi52 %": _ratio(p, q.get("fiftyTwoWeekHigh")),
+                     "Lo52 %": _ratio(p, q.get("fiftyTwoWeekLow")), "PRE": q.get("preMarketChangePercent"),
+                     "POST": q.get("postMarketChangePercent"), "P/E": q.get("trailingPE")})
+    df = pd.DataFrame(rows)
+    for c in ("Price", "Chg %", "Mkt Cap", "Volume", "Avg Vol", "52W %", "PRE", "POST", "P/E"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    if df["52W %"].notna().sum() > 5 and df["52W %"].abs().median() < 1.5:     # some API versions send fractions
+        df["52W %"] = df["52W %"] * 100
+    return df
+
+
+def market_quotes(symbols):
+    """(DataFrame, source): batch quotes, or daily history as a fallback."""
+    df = quotes_df(symbols)
+    if not df.empty and df["Chg %"].notna().sum() >= max(1, len(symbols) // 2):
+        return df, "live"
+    ch = changes(tuple(symbols))
+    if not ch:
+        return pd.DataFrame(), "none"
+    df = pd.DataFrame([{"Symbol": s, "Price": p, "Chg %": c} for s, (p, c) in ch.items()])
+    df["Mkt Cap"] = df["Symbol"].map(lambda s: U.STOCKS[s][3] * 1e9 if s in U.STOCKS else np.nan)
+    return df, "history"
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _perf(symbols):
+    hist = _history_many(symbols, "1y", "1d")
+    rows = []
+    for s, df in hist.items():
+        c = df["Close"].dropna()
+        if len(c) < 6:
+            continue
+        f = lambda n: (c.iloc[-1] / c.iloc[-n - 1] - 1) * 100 if len(c) > n else np.nan
+        ytd = c[c.index.year == c.index[-1].year]
+        rows.append({"Symbol": s, "1W": f(5), "1M": f(21), "3M": f(63),
+                     "YTD": (c.iloc[-1] / ytd.iloc[0] - 1) * 100 if len(ytd) > 1 else np.nan,
+                     "1Y": (c.iloc[-1] / c.iloc[0] - 1) * 100})
+    if not rows:
+        raise Empty("perf")
+    return pd.DataFrame(rows)
+
+
+def perf_table(symbols):
+    """1W / 1M / 3M / YTD / 1Y % change per symbol (cached 30 min)."""
+    try:
+        return _perf(tuple(dict.fromkeys(symbols)))
+    except Exception:
+        return pd.DataFrame()
+
+
+# ---------------------------------------------------------------- financial statements
+STMT_KEYS = ("inc_a", "inc_q", "bal_a", "bal_q", "cf_a", "cf_q")
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def _statements(symbol):
+    t = yf.Ticker(symbol)
+    fns = {"inc_a": lambda: t.income_stmt, "inc_q": lambda: t.quarterly_income_stmt, "bal_a": lambda: t.balance_sheet,
+           "bal_q": lambda: t.quarterly_balance_sheet, "cf_a": lambda: t.cashflow, "cf_q": lambda: t.quarterly_cashflow}
+    out = {}
+    for k, fn in fns.items():
+        try:
+            v = fn()
+            out[k] = v if isinstance(v, pd.DataFrame) else pd.DataFrame()
+        except Exception:
+            out[k] = pd.DataFrame()
+    if all(v.empty for v in out.values()):
+        raise Empty(symbol)
+    return out
+
+
+def statements(symbol):
+    try:
+        return _statements(symbol)
+    except Exception:
+        return {k: pd.DataFrame() for k in STMT_KEYS}
+
+
+# ---------------------------------------------------------------- options market snapshot
+@st.cache_data(ttl=600, show_spinner=False)
+def _opt_snapshot(symbol):
+    t = yf.Ticker(symbol)
+    exps = list(t.options or [])
+    if not exps:
+        raise Empty(symbol)
+    today = pd.Timestamp.now().normalize()
+    exp = next((e for e in exps if (pd.Timestamp(e) - today).days >= 1), exps[0])
+    oc = t.option_chain(exp)
+    calls, puts = oc.calls.copy(), oc.puts.copy()
+    if calls.empty and puts.empty:
+        raise Empty(symbol)
+    und = getattr(oc, "underlying", None) or {}
+    price = und.get("regularMarketPrice") if isinstance(und, dict) else None
+    if not price:
+        h = t.history(period="5d")
+        price = float(h["Close"].iloc[-1]) if not h.empty else None
+    if not price:
+        raise Empty(symbol)
+    for df in (calls, puts):
+        for c in ("volume", "openInterest", "bid", "ask", "lastPrice", "impliedVolatility", "strike"):
+            if c in df:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+    strikes = sorted(set(calls["strike"].dropna()) | set(puts["strike"].dropna()))
+    atm = min(strikes, key=lambda k: abs(k - price))
+
+    def mid(df):
+        r = df[df["strike"] == atm]
+        if r.empty:
+            return np.nan
+        r = r.iloc[0]
+        return (r["bid"] + r["ask"]) / 2 if (r["bid"] or 0) > 0 and (r["ask"] or 0) > 0 else r["lastPrice"]
+    iv = np.nanmean([calls.loc[calls["strike"] == atm, "impliedVolatility"].mean(),
+                     puts.loc[puts["strike"] == atm, "impliedVolatility"].mean()])
+    cv, pv = float(calls["volume"].fillna(0).sum()), float(puts["volume"].fillna(0).sum())
+    coi, poi = float(calls["openInterest"].fillna(0).sum()), float(puts["openInterest"].fillna(0).sum())
+    unusual = []
+    for kind, df in (("CALL", calls), ("PUT", puts)):
+        d = df[(df["volume"].fillna(0) >= 500) & (df["volume"].fillna(0) > df["openInterest"].fillna(0))]
+        for _, r in d.iterrows():
+            unusual.append({"Symbol": symbol, "Type": kind, "Strike": float(r["strike"]), "Expiry": exp, "Volume": float(r["volume"]),
+                            "OI": float(r["openInterest"]) if pd.notna(r["openInterest"]) else 0.0, "Last": float(r["lastPrice"]),
+                            "IV %": float(r["impliedVolatility"]) * 100 if pd.notna(r["impliedVolatility"]) else np.nan})
+    straddle = float(np.nansum([mid(calls), mid(puts)]))
+    return {"symbol": symbol, "price": float(price), "expiry": exp, "dte": max((pd.Timestamp(exp) - today).days, 0),
+            "atm": float(atm), "iv": float(iv) * 100 if pd.notna(iv) else np.nan, "move": straddle,
+            "move_pct": straddle / float(price) * 100, "call_vol": cv, "put_vol": pv, "pc_vol": pv / max(cv, 1),
+            "pc_oi": poi / max(coi, 1), "call_oi": coi, "put_oi": poi, "unusual": unusual, "n_exp": len(exps)}
+
+
+def options_snapshot(symbols):
+    """Nearest-expiry options stats for several underlyings (cached 10 min each)."""
+    def one(s):
+        try:
+            return _opt_snapshot(s)
+        except Exception:
+            return None
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        return [r for r in ex.map(one, symbols) if r]
+
+
+def known_logos(symbols):
+    """Logos already verified by earlier pages (no network)."""
+    return {s: _LOGO_MEM[s] for s in symbols if _LOGO_MEM.get(s)}

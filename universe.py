@@ -269,3 +269,33 @@ def detect_tickers(text):
         if sym not in found and pat.search(text or ""):
             found.append(sym)
     return found
+
+# ---------------------------------------------------------------- futures market (CME / ICE continuous contracts on Yahoo)
+# (group english, group arabic, icon) -> {symbol: (english, arabic)}
+FUTURES = {
+    ("Equity indices", "مؤشرات الأسهم", "show_chart"): {
+        "ES=F": ("S&P 500 E-mini", "إس آند بي 500 المصغر"), "NQ=F": ("Nasdaq 100 E-mini", "ناسداك 100 المصغر"),
+        "YM=F": ("Dow E-mini", "داو جونز المصغر"), "RTY=F": ("Russell 2000 E-mini", "راسل 2000 المصغر")},
+    ("Energy", "الطاقة", "oil_barrel"): {
+        "CL=F": ("WTI Crude Oil", "نفط غرب تكساس"), "BZ=F": ("Brent Crude", "خام برنت"), "NG=F": ("Natural Gas", "الغاز الطبيعي"),
+        "RB=F": ("RBOB Gasoline", "البنزين"), "HO=F": ("Heating Oil", "زيت التدفئة")},
+    ("Metals", "المعادن", "diamond"): {
+        "GC=F": ("Gold", "الذهب"), "SI=F": ("Silver", "الفضة"), "HG=F": ("Copper", "النحاس"), "PL=F": ("Platinum", "البلاتين"),
+        "PA=F": ("Palladium", "البلاديوم")},
+    ("Agriculture", "الزراعة", "agriculture"): {
+        "ZC=F": ("Corn", "الذرة"), "ZW=F": ("Wheat", "القمح"), "ZS=F": ("Soybeans", "فول الصويا"), "KC=F": ("Coffee", "القهوة"),
+        "SB=F": ("Sugar", "السكر"), "CC=F": ("Cocoa", "الكاكاو"), "CT=F": ("Cotton", "القطن"), "LE=F": ("Live Cattle", "الماشية الحية")},
+    ("Interest rates", "أسعار الفائدة", "percent"): {
+        "ZT=F": ("2-Year T-Note", "سندات سنتين"), "ZF=F": ("5-Year T-Note", "سندات 5 سنوات"), "ZN=F": ("10-Year T-Note", "سندات 10 سنوات"),
+        "ZB=F": ("30-Year T-Bond", "سندات 30 سنة")},
+    ("Currencies", "العملات", "currency_exchange"): {
+        "DX=F": ("US Dollar Index", "مؤشر الدولار"), "6E=F": ("Euro FX", "اليورو"), "6J=F": ("Japanese Yen", "الين الياباني"),
+        "6B=F": ("British Pound", "الجنيه الإسترليني"), "6C=F": ("Canadian Dollar", "الدولار الكندي")},
+    ("Crypto", "العملات الرقمية", "currency_bitcoin"): {
+        "BTC=F": ("Bitcoin Futures", "عقود بيتكوين"), "ETH=F": ("Ether Futures", "عقود إيثريوم")},
+}
+FUTURES_NAMES = {s: v for g in FUTURES.values() for s, v in g.items()}
+
+# options market: the most traded underlyings
+OPTION_UNDERLYINGS = ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "META", "MSFT", "AMD", "GOOGL", "PLTR"]
+VIX_CURVE = {"^VIX9D": ("9 days", "9 أيام"), "^VIX": ("30 days", "30 يوم"), "^VIX3M": ("3 months", "3 أشهر"), "^VIX6M": ("6 months", "6 أشهر")}
